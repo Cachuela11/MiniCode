@@ -1,0 +1,14 @@
+[project]
+name = "minicode"
+version = "0.1.0"
+description = "A minimal Claude Code style coding agent with Docker sandbox and Ollama LLM."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+minicode = "minicode.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
