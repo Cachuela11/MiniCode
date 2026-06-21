@@ -32,22 +32,16 @@ minicode "inspect the workspace and create a hello.txt file"
 
 ```mermaid
 flowchart TD
-    A[CLI: python -m minicode] --> B[Load config and create DeepSeekClient]
-    B --> C[Create DockerSandbox and ToolRegistry]
-    C --> D[Build initial context from workspace]
-    D --> E[Send system prompt, task, context, and tool descriptions to DeepSeek]
-    E --> F[DeepSeek returns one JSON action]
-    F --> G{action}
-    G -->|finish| H[Optional final test command]
-    H --> I[Write run log / transcript]
-    I --> J[Print final answer]
-    G -->|tool action| K[ToolRegistry.execute]
-    K --> L[Run tool and collect observation]
-    L --> M[Record step log: action, args, permission, output, files, tokens, duration]
-    M --> N[Append observation to messages]
-    N --> E
-    G -->|max steps reached| O[Stop with max-step answer]
-    O --> I
+    A[User task] --> B[Build prompt with context and tool descriptions]
+    B --> C[DeepSeek returns JSON action]
+    C --> D{Action type}
+    D -->|tool| E[Execute tool]
+    E --> F[Record step log]
+    F --> G[Send observation back to model]
+    G --> C
+    D -->|finish| H[Run optional final test]
+    H --> I[Write run log and print answer]
+    D -->|max steps| I
 ```
 
 ```mermaid
@@ -55,16 +49,19 @@ flowchart TD
     A[ToolRegistry.execute] --> B{tool name}
     B -->|list_files / read_file / write_file| C[Validate workspace path]
     C --> D[Read or write host workspace directly]
-    D --> E[Return ToolResult]
-    B -->|run_tests / run_shell| F[DockerSandbox.run]
-    F --> G[CommandPolicy.check]
-    G -->|deny| H[Return blocked result]
-    G -->|ask| I{approval mode}
-    I -->|never or rejected| H
-    I -->|ask accepted or always| J[Run command in Docker /workspace]
-    G -->|allow| J
-    J --> K[Capture stdout, stderr, exit code, duration]
-    K --> E
+    D --> Z[Return ToolResult]
+    B -->|future API tools| E[Validate API policy and parameters]
+    E --> F[Call external API directly]
+    F --> Z
+    B -->|run_tests / run_shell| G[DockerSandbox.run]
+    G --> H[CommandPolicy.check]
+    H -->|deny| I[Return blocked result]
+    H -->|ask| J{approval mode}
+    J -->|never or rejected| I
+    J -->|ask accepted or always| K[Run command in Docker /workspace]
+    H -->|allow| K
+    K --> L[Capture stdout, stderr, exit code, duration]
+    L --> Z
 ```
 
 ## Configuration
