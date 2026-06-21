@@ -15,6 +15,7 @@ class Decision(str, Enum):
 class PolicyDecision:
     decision: Decision
     reason: str
+    dangerous: bool = False
 
 
 class CommandPolicy:
@@ -38,17 +39,17 @@ class CommandPolicy:
     def check(self, command: str) -> PolicyDecision:
         normalized = " ".join(command.strip().split())
         if not normalized:
-            return PolicyDecision(Decision.DENY, "empty command")
+            return PolicyDecision(Decision.DENY, "empty command", dangerous=False)
 
         for pattern, reason in self.deny_patterns:
             if pattern.search(normalized):
-                return PolicyDecision(Decision.DENY, reason)
+                return PolicyDecision(Decision.DENY, reason, dangerous=True)
 
         for pattern, reason in self.ask_patterns:
             if pattern.search(normalized):
-                return PolicyDecision(Decision.ASK, reason)
+                return PolicyDecision(Decision.ASK, reason, dangerous=True)
 
-        return PolicyDecision(Decision.ALLOW, "command allowed")
+        return PolicyDecision(Decision.ALLOW, "command allowed", dangerous=False)
 
 
 class ApprovalProvider:

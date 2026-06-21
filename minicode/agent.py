@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from .context import build_initial_context
-from .llm import OllamaClient
+from .llm import LLMResponse
+from .observability import FileSnapshot, RunLog, StepLog, TestResult, Timer, summarize_messages
 from .sandbox import DockerSandbox
 from .tools import ToolRegistry
 
@@ -30,6 +32,7 @@ Example:
 class AgentConfig:
     model: str
     max_steps: int = 8
+    final_test_command: str | None = None
 
 
 @dataclass
@@ -37,12 +40,18 @@ class AgentResult:
     answer: str
     steps: int
     transcript: list[dict[str, Any]] = field(default_factory=list)
+    run_log: RunLog | None = None
+
+
+class ChatClient(Protocol):
+    def chat_response(self, model: str, messages: list[dict[str, str]]) -> LLMResponse:
+        ...
 
 
 class CodingAgent:
     def __init__(
         self,
-        llm: OllamaClient,
+        llm: ChatClient,
         sandbox: DockerSandbox,
         config: AgentConfig,
         tools: ToolRegistry | None = None,
@@ -53,6 +62,13 @@ class CodingAgent:
         self.tools = tools or ToolRegistry(workspace=sandbox.workspace, sandbox=sandbox)
 
     def run(self, task: str) -> AgentResult:
+        run_timer = Timer()
+        file_snapshot = FileSnapshot(self.sandbox.workspace)
+        run_log = RunLog(
+            task=task,
+            model=self.config.model,
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
         messages: list[dict[str, str]] = [
             {
                 "role": "system",
@@ -66,7 +82,10 @@ class CodingAgent:
         transcript: list[dict[str, Any]] = []
 
         for step in range(1, self.config.max_steps + 1):
-            raw = self.llm.chat(model=self.config.model, messages=messages)
+            step_timer = Timer()
+            model_input_summary = summarize_messages(messages)
+            llm_response = self.llm.chat_response(model=self.config.model, messages=messages)
+            raw = llm_response.content
             action = _parse_action(raw)
             transcript.append({"step": step, "model": raw, "action": action})
 
@@ -76,22 +95,85 @@ class CodingAgent:
                 args = {}
 
             if name == "finish":
+                answer = str(args.get("answer", "")).strip() or "Done."
+                run_log.steps.append(
+                    StepLog(
+                        step=step,
+                        model_input_summary=model_input_summary,
+                        model_action=action,
+                        tool_name="finish",
+                        tool_args=args,
+                        permission_decision="not_applicable",
+                        permission_reason="",
+                        stdout=answer,
+                        stderr="",
+                        exit_code=0,
+                        modified_files=file_snapshot.diff(),
+                        token_usage=llm_response.token_usage,
+                        duration_ms=step_timer.elapsed_ms(),
+                    )
+                )
+                run_log.token_usage.add(llm_response.token_usage)
+                run_log.answer = answer
+                run_log.final_test_result = self._run_final_test()
+                run_log.duration_ms = run_timer.elapsed_ms()
                 return AgentResult(
-                    answer=str(args.get("answer", "")).strip() or "Done.",
+                    answer=answer,
                     steps=step,
                     transcript=transcript,
+                    run_log=run_log,
                 )
 
             tool_result = self.tools.execute(str(name), args)
             observation = tool_result.output
+            modified_files = file_snapshot.diff()
+            run_log.steps.append(
+                StepLog(
+                    step=step,
+                    model_input_summary=model_input_summary,
+                    model_action=action,
+                    tool_name=str(name),
+                    tool_args=args,
+                    permission_decision=tool_result.permission_decision,
+                    permission_reason=tool_result.permission_reason,
+                    stdout=tool_result.stdout,
+                    stderr=tool_result.stderr,
+                    exit_code=tool_result.exit_code,
+                    modified_files=modified_files,
+                    token_usage=llm_response.token_usage,
+                    duration_ms=step_timer.elapsed_ms(),
+                    dangerous_command=tool_result.dangerous_command,
+                    invalid_command=tool_result.invalid_command,
+                )
+            )
+            run_log.token_usage.add(llm_response.token_usage)
 
             messages.append({"role": "assistant", "content": json.dumps(action)})
             messages.append({"role": "user", "content": f"Observation:\n{observation}"})
 
+        answer = f"Stopped after {self.config.max_steps} steps without finish."
+        run_log.answer = answer
+        run_log.final_test_result = self._run_final_test()
+        run_log.duration_ms = run_timer.elapsed_ms()
         return AgentResult(
-            answer=f"Stopped after {self.config.max_steps} steps without finish.",
+            answer=answer,
             steps=self.config.max_steps,
             transcript=transcript,
+            run_log=run_log,
+        )
+
+    def _run_final_test(self) -> TestResult | None:
+        if not self.config.final_test_command:
+            return None
+        timer = Timer()
+        result = self.sandbox.run(self.config.final_test_command)
+        return TestResult(
+            command=self.config.final_test_command,
+            passed=result.exit_code == 0,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.exit_code,
+            duration_ms=timer.elapsed_ms(),
         )
 
 

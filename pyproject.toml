@@ -1,7 +1,7 @@
 [project]
 name = "minicode"
 version = "0.1.0"
-description = "A minimal Claude Code style coding agent with Docker sandbox and Ollama LLM."
+description = "A minimal Claude Code style coding agent with Docker sandbox and DeepSeek API."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []

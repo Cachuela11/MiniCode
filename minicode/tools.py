@@ -12,6 +12,14 @@ from .sandbox import DockerSandbox, SandboxResult
 class ToolResult:
     ok: bool
     output: str
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int | None = None
+    permission_decision: str = "not_applicable"
+    permission_reason: str = ""
+    dangerous_command: bool = False
+    invalid_command: bool = False
+    duration_ms: int = 0
 
 
 ToolHandler = Callable[[dict[str, Any]], ToolResult]
@@ -47,16 +55,25 @@ class ToolRegistry:
     def execute(self, name: str, args: dict[str, Any]) -> ToolResult:
         handler = self._tools.get(name)
         if handler is None:
-            return ToolResult(False, f"ERROR: unknown action {name!r}. Available tools: {', '.join(self.names())}")
+            message = f"ERROR: unknown action {name!r}. Available tools: {', '.join(self.names())}"
+            return ToolResult(
+                False,
+                message,
+                stderr=message,
+                exit_code=127,
+                invalid_command=True,
+            )
         try:
             return handler(args)
         except Exception as exc:
-            return ToolResult(False, f"ERROR: {exc}")
+            message = f"ERROR: {exc}"
+            return ToolResult(False, message, stderr=message, exit_code=1)
 
     def _run_shell(self, args: dict[str, Any]) -> ToolResult:
         command = str(args.get("command", "")).strip()
         if not command:
-            return ToolResult(False, "ERROR: run_shell requires args.command.")
+            message = "ERROR: run_shell requires args.command."
+            return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
         return _sandbox_result_to_tool_result(self.sandbox.run(command))
 
     def _list_files(self, args: dict[str, Any]) -> ToolResult:
@@ -76,34 +93,41 @@ class ToolRegistry:
                 path = current_path / filename
                 rows.append(path.relative_to(self.workspace).as_posix())
                 if len(rows) >= limit:
-                    return ToolResult(True, "\n".join(rows))
-        return ToolResult(True, "\n".join(rows) or "No files found.")
+                    output = "\n".join(rows)
+                    return ToolResult(True, output, stdout=output, exit_code=0)
+        output = "\n".join(rows) or "No files found."
+        return ToolResult(True, output, stdout=output, exit_code=0)
 
     def _read_file(self, args: dict[str, Any]) -> ToolResult:
         path = self._resolve_workspace_path(str(args.get("path", "")))
         start_line = _as_int(args.get("start_line", 1), default=1, minimum=1, maximum=1_000_000)
         limit = _as_int(args.get("limit", 200), default=200, minimum=1, maximum=2000)
         if not path.is_file():
-            return ToolResult(False, f"ERROR: file not found: {path.relative_to(self.workspace).as_posix()}")
+            message = f"ERROR: file not found: {path.relative_to(self.workspace).as_posix()}"
+            return ToolResult(False, message, stderr=message, exit_code=1)
 
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         selected = lines[start_line - 1 : start_line - 1 + limit]
         numbered = [f"{index}: {line}" for index, line in enumerate(selected, start=start_line)]
-        return ToolResult(True, "\n".join(numbered) or "File is empty or range has no lines.")
+        output = "\n".join(numbered) or "File is empty or range has no lines."
+        return ToolResult(True, output, stdout=output, exit_code=0)
 
     def _write_file(self, args: dict[str, Any]) -> ToolResult:
         path = self._resolve_workspace_path(str(args.get("path", "")))
         content = args.get("content")
         overwrite = bool(args.get("overwrite", False))
         if not isinstance(content, str):
-            return ToolResult(False, "ERROR: write_file requires string args.content.")
+            message = "ERROR: write_file requires string args.content."
+            return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
         if path.exists() and not overwrite:
-            return ToolResult(False, "ERROR: file exists. Set overwrite=true to replace it.")
+            message = "ERROR: file exists. Set overwrite=true to replace it."
+            return ToolResult(False, message, stderr=message, exit_code=1)
 
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         rel = path.relative_to(self.workspace).as_posix()
-        return ToolResult(True, f"Wrote {rel} ({len(content)} bytes).")
+        output = f"Wrote {rel} ({len(content)} bytes)."
+        return ToolResult(True, output, stdout=output, exit_code=0)
 
     def _run_tests(self, args: dict[str, Any]) -> ToolResult:
         command = str(args.get("command", "python -m pytest")).strip() or "python -m pytest"
@@ -120,7 +144,17 @@ class ToolRegistry:
 
 def _sandbox_result_to_tool_result(result: SandboxResult) -> ToolResult:
     output = f"exit_code={result.exit_code}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    return ToolResult(result.exit_code == 0, output)
+    return ToolResult(
+        result.exit_code == 0,
+        output,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        exit_code=result.exit_code,
+        permission_decision=result.permission_decision,
+        permission_reason=result.permission_reason,
+        dangerous_command=result.dangerous_command,
+        duration_ms=result.duration_ms,
+    )
 
 
 def _as_int(value: Any, default: int, minimum: int, maximum: int) -> int:
