@@ -99,7 +99,7 @@ MiniCode/
 
 - `pyproject.toml`：Python 项目配置，定义包名、版本、Python 版本要求和 `minicode` 命令行入口。
 - `.env.example`：环境变量示例，包含 DeepSeek、Docker、日志和 eval 相关配置。
-- `.gitignore`：忽略 `.minicode/`、Python 缓存和安装元数据。
+- `.gitignore`：忽略 `.minicode/`、Python 缓存和安装元数据。`.minicode/` 是本机持久运行数据目录，但默认不提交到 Git。
 - `minicode/__main__.py`：支持 `python -m minicode` 的入口文件，只负责转发到 CLI。
 - `minicode/cli.py`：命令行入口，解析参数，创建 `DeepSeekClient`、`DockerSandbox`、`CodingAgent`，并处理 `--check`、`--eval`、`--run-log` 等模式。
 - `minicode/agent.py`：agent 主循环。它负责构建 prompt、调用模型、解析 JSON action、执行 tool、记录 step log，并在结束时运行可选 final test。
@@ -180,7 +180,7 @@ MiniCode/
 - `MINICODE_DOCKER_IMAGE`：sandbox 镜像，默认 `python:3.12-slim`
 - `MINICODE_MAX_STEPS`：agent 最大循环步数，默认 `8`
 - `MINICODE_APPROVAL`：风险命令审批模式，默认 `never`
-- `MINICODE_RUN_LOG`：结构化运行日志输出路径
+- `MINICODE_RUN_LOG`：结构化运行日志输出目录或文件路径，默认 `.minicode/runs`
 - `MINICODE_FINAL_TEST_COMMAND`：agent 结束后运行的最终测试命令
 - `MINICODE_EVAL_OUTPUT`：eval 报告输出路径，默认 `.minicode/eval-report.json`
 
@@ -205,10 +205,36 @@ python -m minicode --approval ask "run tests and fix failures"
 
 ## 运行日志
 
-MiniCode 可以为每次运行写一个结构化 JSON 日志：
+MiniCode 默认会为每次运行写一个结构化 JSON 日志。日志是本地持久数据，不会因为下一次运行而覆盖。
 
 ```powershell
-python -m minicode --run-log .minicode/run-log.json --final-test-command "python -m unittest discover -s tests" "fix the failing test"
+python -m minicode --final-test-command "python -m unittest discover -s tests" "fix the failing test"
+```
+
+默认日志目录：
+
+```text
+.minicode/runs/
+```
+
+日志文件名会包含时间戳和任务摘要，例如：
+
+```text
+.minicode/runs/20260621-221530-fix-the-failing-test.json
+```
+
+也可以手动指定目录：
+
+```powershell
+python -m minicode --run-log .minicode/my-runs "list files"
+```
+
+如果手动指定固定文件名，MiniCode 也不会覆盖旧文件，而是自动追加编号：
+
+```text
+.minicode/run-log.json
+.minicode/run-log-1.json
+.minicode/run-log-2.json
 ```
 
 每一步会记录：

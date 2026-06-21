@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+from datetime import datetime
 from pathlib import Path
 
 from .agent import AgentConfig, CodingAgent
@@ -59,8 +61,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--run-log",
-        default=os.getenv("MINICODE_RUN_LOG"),
-        help="Optional path to write the structured runtime log JSON.",
+        default=os.getenv("MINICODE_RUN_LOG", ".minicode/runs"),
+        help="Path or directory for persistent structured run logs.",
     )
     parser.add_argument(
         "--final-test-command",
@@ -139,12 +141,8 @@ def main(argv: list[str] | None = None) -> int:
             encoding="utf-8",
         )
     if args.run_log and result.run_log:
-        run_log_path = Path(args.run_log)
-        run_log_path.parent.mkdir(parents=True, exist_ok=True)
-        run_log_path.write_text(
-            json.dumps(result.run_log.to_dict(), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        run_log_path = _write_run_log(Path(args.run_log), result.run_log.to_dict())
+        print(f"Run log written to {run_log_path}")
 
     return 0
 
@@ -164,6 +162,43 @@ def _build_llm(args):
         timeout=args.llm_timeout,
         max_tokens=args.max_tokens,
     )
+
+
+def _write_run_log(target: Path, payload: dict) -> Path:
+    path = _resolve_run_log_path(target, payload)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _resolve_run_log_path(target: Path, payload: dict) -> Path:
+    if target.suffix.lower() == ".json":
+        return _avoid_overwrite(target)
+
+    task = str(payload.get("task") or "run")
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"{timestamp}-{_slugify(task)}.json"
+    return _avoid_overwrite(target / filename)
+
+
+def _avoid_overwrite(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    for index in range(1, 1000):
+        candidate = path.with_name(f"{stem}-{index}{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"could not find available log filename for {path}")
+
+
+def _slugify(value: str, limit: int = 60) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-._")
+    return (slug or "run")[:limit]
 
 
 def _check_environment(llm, sandbox: DockerSandbox, model: str) -> int:

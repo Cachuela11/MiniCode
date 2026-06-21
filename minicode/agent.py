@@ -19,12 +19,16 @@ tools for file operations and tests. Use run_shell only when the structured
 tools are not enough. Keep changes focused on the user request.
 
 Return exactly one JSON object and no Markdown fences.
+Every response must include "action" and "args". For final answers, put the
+answer inside args.answer, not at the top level.
 
 Available actions:
 {tool_descriptions}
 
 Example:
 {{"thought":"I should inspect the workspace.","action":"list_files","args":{{"path":".","max_depth":2}}}}
+Final answer example:
+{{"thought":"I can now answer.","action":"finish","args":{{"answer":"summary for the user"}}}}
 """
 
 
@@ -95,7 +99,7 @@ class CodingAgent:
                 args = {}
 
             if name == "finish":
-                answer = str(args.get("answer", "")).strip() or "Done."
+                answer = _extract_finish_answer(action, args)
                 run_log.steps.append(
                     StepLog(
                         step=step,
@@ -199,4 +203,17 @@ def _parse_action(raw: str) -> dict[str, Any]:
 
     if not isinstance(value, dict):
         raise ValueError("Agent action must be a JSON object.")
+    if "action" not in value and "answer" in value:
+        value = {
+            "thought": value.get("thought", "The model returned a bare answer."),
+            "action": "finish",
+            "args": {"answer": value.get("answer", "")},
+        }
     return value
+
+
+def _extract_finish_answer(action: dict[str, Any], args: dict[str, Any]) -> str:
+    answer = args.get("answer")
+    if not answer:
+        answer = action.get("answer")
+    return str(answer or "Done.").strip()

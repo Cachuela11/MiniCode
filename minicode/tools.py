@@ -48,7 +48,7 @@ class ToolRegistry:
                 '- read_file: {"path": "relative/path", "start_line": 1, "limit": 200}',
                 '- write_file: {"path": "relative/path", "content": "new file content", "overwrite": false}',
                 '- run_tests: {"command": "test command, default: python -m pytest"}',
-                '- finish: {"answer": "concise final answer for the user"}',
+                '- finish: {"answer": "concise final answer for the user"} inside args, e.g. {"action":"finish","args":{"answer":"..."}}',
             ]
         )
 
