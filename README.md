@@ -1,19 +1,22 @@
 # MiniCode
 
-MiniCode is a minimal Claude Code style coding agent scaffold. The first milestone is intentionally small:
+MiniCode 是一个最小可运行的 coding agent 框架。当前阶段的目标不是一次性做完整智能体，而是先把核心 runtime 跑通：
 
-- LLM: DeepSeek API
-- Sandbox: Docker CLI
-- Agent loop: JSON actions with structured tools and final answer
-- Future extension points: context, harness, memory, skills, self-evolution
+- LLM：DeepSeek API
+- Sandbox：Docker CLI
+- Agent loop：模型返回 JSON action，系统执行 tool，再把 observation 回传给模型
+- 可观测性：结构化 run log、token、耗时、权限决策、文件修改记录
+- Eval：内置一组简单任务，用来衡量后续 Skill、Memory、自我进化是否真的有效
 
-## Requirements
+后续还会继续扩展 context、harness、memory、skills 和 self-evolution。
+
+## 运行要求
 
 - Python 3.11+
 - Docker
-- A DeepSeek API key
+- DeepSeek API Key
 
-## Quick Start
+## 快速开始
 
 ```powershell
 $env:DEEPSEEK_API_KEY = "sk-..."
@@ -22,7 +25,7 @@ python -m minicode --check
 python -m minicode "inspect the workspace and create a hello.txt file"
 ```
 
-Or after installing the editable package:
+安装为 editable package 后，也可以直接运行：
 
 ```powershell
 minicode "inspect the workspace and create a hello.txt file"
@@ -64,112 +67,187 @@ flowchart TD
     L --> Z
 ```
 
-## Configuration
+第一张图是 agent 主循环：用户任务进入后，MiniCode 构建 prompt，DeepSeek 返回一个 JSON action，系统执行对应 tool，并把 observation 再发回模型，直到模型返回 `finish` 或达到最大步数。
 
-Environment variables:
+第二张图是 tool 执行路径：不是所有 tool 都走 Docker。文件类 tool 直接在本地 workspace 内执行路径校验和读写；`run_shell` / `run_tests` 才会进入 Docker sandbox；未来 API 类 tool 会走自己的 API 参数校验和权限策略。
 
-- `MINICODE_MODEL`: DeepSeek model name, default `deepseek-v4-flash`
-- `DEEPSEEK_API_KEY`: DeepSeek API key
-- `MINICODE_DEEPSEEK_URL`: DeepSeek base URL, default `https://api.deepseek.com`
-- `MINICODE_LLM_TIMEOUT`: seconds to wait for one LLM response, default `120`
-- `MINICODE_MAX_TOKENS`: maximum completion tokens for API providers, default `4096`
-- `MINICODE_WORKSPACE`: workspace mounted into Docker, default current directory
-- `MINICODE_DOCKER_IMAGE`: sandbox image, default `python:3.12-slim`
-- `MINICODE_MAX_STEPS`: agent loop limit, default `8`
-- `MINICODE_APPROVAL`: approval mode for risky commands, default `never`
-- `MINICODE_RUN_LOG`: optional path for structured run logs
-- `MINICODE_FINAL_TEST_COMMAND`: optional command to run after the agent finishes
-- `MINICODE_EVAL_OUTPUT`: eval report output path, default `.minicode/eval-report.json`
+## 项目文件架构
 
-Example:
+```text
+MiniCode/
+  pyproject.toml
+  README.md
+  .env.example
+  .gitignore
+  minicode/
+    __main__.py
+    __init__.py
+    cli.py
+    agent.py
+    llm.py
+    tools.py
+    sandbox.py
+    permissions.py
+    context.py
+    observability.py
+    eval.py
+    harness.py
+    memory.py
+    skills.py
+    evolution.py
+```
+
+- `pyproject.toml`：Python 项目配置，定义包名、版本、Python 版本要求和 `minicode` 命令行入口。
+- `.env.example`：环境变量示例，包含 DeepSeek、Docker、日志和 eval 相关配置。
+- `.gitignore`：忽略 `.minicode/`、Python 缓存和安装元数据。
+- `minicode/__main__.py`：支持 `python -m minicode` 的入口文件，只负责转发到 CLI。
+- `minicode/cli.py`：命令行入口，解析参数，创建 `DeepSeekClient`、`DockerSandbox`、`CodingAgent`，并处理 `--check`、`--eval`、`--run-log` 等模式。
+- `minicode/agent.py`：agent 主循环。它负责构建 prompt、调用模型、解析 JSON action、执行 tool、记录 step log，并在结束时运行可选 final test。
+- `minicode/llm.py`：DeepSeek API client。调用 OpenAI-compatible `/chat/completions`，返回模型内容、token 用量和耗时。
+- `minicode/tools.py`：Tool runtime。注册并执行当前支持的 tools，统一返回 `ToolResult`。
+- `minicode/sandbox.py`：Docker sandbox。负责把命令放进 Docker 的 `/workspace` 中执行，并收集 stdout、stderr、exit code、耗时和权限信息。
+- `minicode/permissions.py`：命令权限策略。对危险命令做 `allow`、`ask`、`deny` 判断，并支持 `never`、`ask`、`always` 三种审批模式。
+- `minicode/context.py`：初始上下文构建，目前会读取 workspace 的基础文件列表。
+- `minicode/observability.py`：结构化日志模型。记录每一步的模型输入摘要、action、tool 参数、权限决策、输出、修改文件、token 和耗时。
+- `minicode/eval.py`：内置 eval 任务集和指标汇总。用于衡量任务成功率、测试通过率、tool 调用次数、危险命令等。
+- `minicode/harness.py`：后续 harness 占位。未来用于自动判断项目类型、运行验证命令和驱动修复循环。
+- `minicode/memory.py`：后续 memory 占位。未来用于持久化经验、项目偏好和历史结果。
+- `minicode/skills.py`：后续 skill 占位。未来用于加载任务工作流，比如调试、代码审查、测试修复等。
+- `minicode/evolution.py`：后续自我进化占位。未来用于反思失败案例、沉淀策略和生成改进建议。
+
+## 当前支持的 Tools
+
+模型每轮必须返回一个 JSON object，例如：
+
+```json
+{"thought":"short reasoning","action":"list_files","args":{"path":".","max_depth":2}}
+```
+
+或者结束任务：
+
+```json
+{"thought":"done","action":"finish","args":{"answer":"summary for the user"}}
+```
+
+当前 tools：
+
+- `list_files`
+  - 参数：`path`、`max_depth`、`limit`
+  - 作用：列出 workspace 内文件。
+  - 执行位置：本地 host workspace。
+  - 安全策略：会校验路径不能逃出 workspace。
+
+- `read_file`
+  - 参数：`path`、`start_line`、`limit`
+  - 作用：读取文件的指定行范围。
+  - 执行位置：本地 host workspace。
+  - 安全策略：会校验路径不能逃出 workspace。
+
+- `write_file`
+  - 参数：`path`、`content`、`overwrite`
+  - 作用：写入文件。默认不覆盖已有文件，除非 `overwrite=true`。
+  - 执行位置：本地 host workspace。
+  - 安全策略：会校验路径不能逃出 workspace。
+
+- `run_tests`
+  - 参数：`command`
+  - 默认命令：`python -m pytest`
+  - 作用：在 Docker sandbox 中运行测试命令。
+  - 执行位置：Docker `/workspace`。
+  - 安全策略：先经过 `CommandPolicy`，再决定是否执行。
+
+- `run_shell`
+  - 参数：`command`
+  - 作用：兜底 shell tool，用于结构化 tool 不够用的情况。
+  - 执行位置：Docker `/workspace`。
+  - 安全策略：先经过 `CommandPolicy`，危险命令会被拒绝或要求审批。
+
+- `finish`
+  - 参数：`answer`
+  - 作用：结束 agent loop，返回最终答案。
+  - 执行位置：不执行外部操作。
+
+## 配置
+
+环境变量：
+
+- `MINICODE_MODEL`：DeepSeek 模型名，默认 `deepseek-v4-flash`
+- `DEEPSEEK_API_KEY`：DeepSeek API Key
+- `MINICODE_DEEPSEEK_URL`：DeepSeek API base URL，默认 `https://api.deepseek.com`
+- `MINICODE_LLM_TIMEOUT`：单次 LLM 响应超时时间，默认 `120`
+- `MINICODE_MAX_TOKENS`：API provider 的最大输出 token，默认 `4096`
+- `MINICODE_WORKSPACE`：挂载到 Docker 的 workspace，默认当前目录
+- `MINICODE_DOCKER_IMAGE`：sandbox 镜像，默认 `python:3.12-slim`
+- `MINICODE_MAX_STEPS`：agent 最大循环步数，默认 `8`
+- `MINICODE_APPROVAL`：风险命令审批模式，默认 `never`
+- `MINICODE_RUN_LOG`：结构化运行日志输出路径
+- `MINICODE_FINAL_TEST_COMMAND`：agent 结束后运行的最终测试命令
+- `MINICODE_EVAL_OUTPUT`：eval 报告输出路径，默认 `.minicode/eval-report.json`
+
+示例：
 
 ```powershell
 $env:MINICODE_MODEL = "deepseek-v4-pro"
 python -m minicode "list files"
 ```
 
-Approval modes:
+审批模式：
 
-- `never`: block commands that require approval
-- `ask`: prompt in the console before running approval-required commands
-- `always`: allow approval-required commands without prompting
+- `never`：需要审批的命令直接阻止
+- `ask`：在控制台询问是否允许
+- `always`：自动允许需要审批的命令
 
-Example:
+示例：
 
 ```powershell
 python -m minicode --approval ask "run tests and fix failures"
 ```
 
-## Runtime Logs
+## 运行日志
 
-MiniCode can write a structured JSON log for every agent run:
+MiniCode 可以为每次运行写一个结构化 JSON 日志：
 
 ```powershell
 python -m minicode --run-log .minicode/run-log.json --final-test-command "python -m unittest discover -s tests" "fix the failing test"
 ```
 
-Each step records:
+每一步会记录：
 
-- model input summary
-- model action
-- tool name and parameters
-- permission decision
-- stdout, stderr, and exit code
-- modified files
-- token usage
-- elapsed time
-- dangerous or invalid commands
+- 模型输入摘要
+- 模型生成的 action
+- tool 名称和参数
+- 权限决策
+- stdout、stderr、exit code
+- 修改文件
+- token 消耗
+- 运行耗时
+- 是否出现危险或无效命令
 
-If `--final-test-command` is set, the final test result is recorded on the run log.
+如果设置了 `--final-test-command`，最终测试结果也会写入 run log。
 
 ## Eval
 
-Run the built-in eval suite:
+运行内置 eval：
 
 ```powershell
 python -m minicode --eval --approval never
 ```
 
-The suite creates isolated workspaces under `.minicode/eval-runs` and measures:
+eval 会在 `.minicode/eval-runs` 下创建隔离 workspace，并统计：
 
-- task success rate
-- test pass rate
-- average tool calls
-- invalid command count
-- modified file count
-- token usage
-- total elapsed time
-- dangerous command count
+- 任务成功率
+- 测试通过率
+- 平均 tool 调用次数
+- 无效命令次数
+- 修改文件数量
+- token 用量
+- 总耗时
+- 危险命令次数
 
-Current eval cases:
+当前 eval 任务：
 
-- fix a failing unit test
-- add an API
-- fix a type error
-- refactor a function
-- add input validation
-
-## Current Tool Protocol
-
-The model must return one JSON object per turn:
-
-```json
-{"thought":"short reasoning","action":"list_files","args":{"path":".","max_depth":2}}
-```
-
-or:
-
-```json
-{"thought":"done","action":"finish","args":{"answer":"summary for the user"}}
-```
-
-Available tools:
-
-- `list_files`: list workspace files with `path`, `max_depth`, and `limit`
-- `read_file`: read a bounded line range with `path`, `start_line`, and `limit`
-- `write_file`: write a workspace file with `path`, `content`, and `overwrite`
-- `run_tests`: run a test command in Docker, default `python -m pytest`
-- `run_shell`: fallback shell command in Docker
-- `finish`: return the final answer
-
-This will evolve into richer context, harness, memory, skill, and self-improvement modules later.
+- 修复一个失败的单元测试
+- 补充一个 API
+- 修复类型错误
+- 重构一个函数
+- 增加输入校验
