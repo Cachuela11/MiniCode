@@ -35,8 +35,8 @@ minicode "inspect the workspace and create a hello.txt file"
 
 ```mermaid
 flowchart TD
-    A[User task] --> B[Build prompt with context and tool descriptions]
-    B --> C[DeepSeek returns JSON action]
+    A[User query] --> B[Build prompt with context and tool descriptions]
+    B --> C[LLM returns JSON action]
     C --> D{Action type}
     D -->|tool| E[Execute tool]
     E --> F[Record step log]
