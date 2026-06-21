@@ -37,12 +37,12 @@ minicode "inspect the workspace and create a hello.txt file"
 flowchart TD
     A[User query] --> B[Build prompt with context and tool descriptions]
     B --> C[LLM returns JSON action]
-    C --> D{Action type}
-    D -->|tool| E[Execute tool]
+    C --> D{Decision}
+    D -->|tool call| E[Execute tool]
     E --> F[Record step log]
     F --> G[Send observation back to model]
     G --> C
-    D -->|finish| H[Run optional final test]
+    D -->|finished| H[Run final test]
     H --> I[Write run log and print answer]
     D -->|max steps| I
 ```
