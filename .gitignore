@@ -1,6 +1,7 @@
 # Local persistent MiniCode run logs, eval outputs, and Docker config.
 # Keep them on this machine, but do not commit them by default.
 .minicode/
+.env
 __pycache__/
 *.pyc
 *.egg-info/
