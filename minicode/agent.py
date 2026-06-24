@@ -7,9 +7,9 @@ from typing import Any, Protocol
 
 from .context import build_initial_context
 from .llm import LLMResponse
-from .observability import FileSnapshot, RunLog, StepLog, TestResult, Timer, summarize_messages
+from .observability import FileSnapshot, RunLog, StepLog, TestResult, Timer, TokenUsage, summarize_messages
 from .sandbox import DockerSandbox
-from .skills import RuleBasedSkillRouter, SkillCatalog, SkillRoute, render_skill_prompt
+from .skills import SkillCatalog, SkillRoute, TwoStageSkillRouter, render_skill_prompt
 from .tools import ToolRegistry
 
 
@@ -43,6 +43,7 @@ class AgentConfig:
     final_test_command: str | None = None
     skills_enabled: bool = True
     max_skills: int = 2
+    skill_recall_k: int = 8
 
 
 @dataclass
@@ -83,6 +84,14 @@ class CodingAgent:
         )
         skill_route = self._route_skills(task)
         run_log.skill_route = skill_route.to_log_dict()
+        if skill_route.rerank_token_usage:
+            run_log.token_usage.add(
+                TokenUsage(
+                    prompt_tokens=skill_route.rerank_token_usage.get("prompt_tokens", 0),
+                    completion_tokens=skill_route.rerank_token_usage.get("completion_tokens", 0),
+                    total_tokens=skill_route.rerank_token_usage.get("total_tokens", 0),
+                )
+            )
         messages: list[dict[str, str]] = [
             {
                 "role": "system",
@@ -196,7 +205,13 @@ class CodingAgent:
     def _route_skills(self, task: str) -> SkillRoute:
         if not self.config.skills_enabled:
             return SkillRoute(intent="disabled", rejected=self.skill_catalog.names())
-        router = RuleBasedSkillRouter(self.skill_catalog, max_skills=self.config.max_skills)
+        router = TwoStageSkillRouter(
+            self.skill_catalog,
+            max_skills=self.config.max_skills,
+            recall_k=self.config.skill_recall_k,
+            llm=self.llm,
+            model=self.config.model,
+        )
         return router.route(task)
 
 

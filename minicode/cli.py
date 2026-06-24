@@ -102,6 +102,12 @@ def main(argv: list[str] | None = None) -> int:
         default=int(os.getenv("MINICODE_MAX_SKILLS", "2")),
         help="Maximum selected skills to inject into the prompt.",
     )
+    parser.add_argument(
+        "--skill-recall-k",
+        type=int,
+        default=int(os.getenv("MINICODE_SKILL_RECALL_K", "8")),
+        help="Number of candidate skills to recall before reranking.",
+    )
     args = parser.parse_args(argv)
 
     workspace = Path(args.workspace).resolve()
@@ -127,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
             skills_dir=Path(args.skills_dir),
             skills_enabled=not args.disable_skills,
             max_skills=args.max_skills,
+            skill_recall_k=args.skill_recall_k,
         )
         print(json.dumps(report.summary, indent=2, ensure_ascii=False))
         print(f"Eval report written to {args.eval_output}")
@@ -144,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
             final_test_command=args.final_test_command,
             skills_enabled=not args.disable_skills,
             max_skills=args.max_skills,
+            skill_recall_k=args.skill_recall_k,
         ),
         skill_catalog=skill_catalog,
     )

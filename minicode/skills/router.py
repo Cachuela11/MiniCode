@@ -1,75 +1,63 @@
 from __future__ import annotations
 
-import re
-import unicodedata
-
 from .catalog import SkillCatalog
-from .schema import SelectedSkill, Skill, SkillRoute
+from .ranker import LlmSkillRanker, RuleBasedSkillRanker
+from .retriever import MetadataSkillRetriever
+from .schema import SkillRoute
 
 
-class RuleBasedSkillRouter:
-    def __init__(self, catalog: SkillCatalog, max_skills: int = 2):
+class TwoStageSkillRouter:
+    def __init__(
+        self,
+        catalog: SkillCatalog,
+        max_skills: int = 2,
+        recall_k: int = 8,
+        llm=None,
+        model: str = "",
+    ):
         self.catalog = catalog
         self.max_skills = max(0, max_skills)
+        self.recall_k = max(0, recall_k)
+        self.llm = llm
+        self.model = model
 
     def route(self, task: str) -> SkillRoute:
         if self.max_skills == 0:
             return SkillRoute(intent="none", rejected=self.catalog.names())
 
-        selected: list[SelectedSkill] = []
-        rejected: list[str] = []
-        for skill in self.catalog.all():
-            score, reason = _score_skill(task, skill)
-            if score > 0:
-                selected.append(SelectedSkill(skill=skill, score=score, reason=reason))
-            else:
-                rejected.append(skill.name)
+        recalled = MetadataSkillRetriever(self.catalog, top_k=self.recall_k).retrieve(task)
+        rank_result = self._rerank(task, recalled)
+        selected = rank_result.selected
+        selected_names = {item.skill.name for item in selected}
+        recalled_names = {item.skill.name for item in recalled}
+        rerank_rejected = sorted(recalled_names - selected_names)
+        not_recalled = sorted(set(self.catalog.names()) - recalled_names)
+        rejected = [f"rerank_rejected:{name}" for name in rerank_rejected]
+        intent = rank_result.intent
+        if not recalled:
+            rejected = self.catalog.names()
+        else:
+            rejected.extend(f"not_recalled:{name}" for name in not_recalled)
+        return SkillRoute(
+            intent=intent,
+            recalled=recalled,
+            selected=selected,
+            rejected=rejected,
+            reranker=rank_result.reranker,
+            rerank_token_usage=rank_result.token_usage,
+            rerank_error=rank_result.error,
+        )
 
-        selected = sorted(selected, key=lambda item: (-item.score, item.skill.name))
-        selected = selected[: self.max_skills]
-        intent = selected[0].skill.intents[0] if selected and selected[0].skill.intents else "general"
-        return SkillRoute(intent=intent, selected=selected, rejected=rejected)
+    def _rerank(self, task: str, recalled):
+        if self.llm is None:
+            selected = RuleBasedSkillRanker(max_skills=self.max_skills).rank(task, recalled)
+            intent = selected[0].skill.intents[0] if selected and selected[0].skill.intents else "general"
+            from .schema import RankResult
 
-
-def _score_skill(task: str, skill: Skill) -> tuple[int, str]:
-    task_text = _normalize(task)
-    matches: list[str] = []
-    score = 0
-
-    for trigger in skill.triggers:
-        if _contains(task_text, trigger):
-            score += 5
-            matches.append(f"trigger:{trigger}")
-
-    for tag in skill.tags:
-        if _contains(task_text, tag):
-            score += 2
-            matches.append(f"tag:{tag}")
-
-    for intent in skill.intents:
-        if _contains(task_text, intent.replace("_", " ")):
-            score += 3
-            matches.append(f"intent:{intent}")
-
-    for word in skill.name.replace("_", " ").split():
-        if _contains(task_text, word):
-            score += 1
-            matches.append(f"name:{word}")
-
-    for word in _normalize(skill.description).split():
-        if len(word) >= 4 and word in task_text:
-            score += 1
-            matches.append(f"description:{word}")
-            break
-
-    return score, ", ".join(matches) if matches else ""
+            return RankResult(intent=intent, selected=selected, reranker="rule")
+        return LlmSkillRanker(self.llm, model=self.model, max_skills=self.max_skills).rank(task, recalled)
 
 
-def _contains(text: str, needle: str) -> bool:
-    normalized = _normalize(needle)
-    return bool(normalized and normalized in text)
-
-
-def _normalize(value: str) -> str:
-    text = unicodedata.normalize("NFKC", value).casefold()
-    return re.sub(r"\s+", " ", text).strip()
+class RuleBasedSkillRouter(TwoStageSkillRouter):
+    def __init__(self, catalog: SkillCatalog, max_skills: int = 2, recall_k: int = 8):
+        super().__init__(catalog=catalog, max_skills=max_skills, recall_k=recall_k)

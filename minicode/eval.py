@@ -63,6 +63,7 @@ def run_eval(
     skills_dir: Path,
     skills_enabled: bool,
     max_skills: int,
+    skill_recall_k: int,
 ) -> EvalReport:
     output_path = output_path.resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,6 +96,7 @@ def run_eval(
                 final_test_command=case.test_command,
                 skills_enabled=skills_enabled,
                 max_skills=max_skills,
+                skill_recall_k=skill_recall_k,
             ),
             skill_catalog=skill_catalog,
         )

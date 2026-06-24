@@ -138,27 +138,28 @@ Skill 是给模型看的工作手册，不是可执行函数。Tool 负责真正
 
 ```mermaid
 flowchart TD
-    A[User task] --> B[SkillCatalog loads .skills/*.md]
-    B --> C[RuleBasedSkillRouter scores skills]
-    C --> D{Any skill selected?}
-    D -->|yes| E[Render selected skill workflow]
-    D -->|no| F[Render no specific skill selected]
-    E --> G[Build prompt with tools and skills]
-    F --> G
-    G --> H[DeepSeek returns one JSON action]
-    H --> I[ToolRegistry executes action]
-    I --> J[Observation returned to model]
-    J --> H
-    H -->|finish| K[Run log records skill_route]
+    A[User task] --> B[Load .skills/*.md]
+    B --> C[Stage 1: metadata recall topK]
+    C --> D[Stage 2: DeepSeek rerank topN]
+    D --> E{Selected skills?}
+    E -->|yes| F[Inject selected skill docs]
+    E -->|no| G[Inject tool list only]
+    F --> H[Build agent prompt]
+    G --> H
+    D --> I[Record skill_route in run log]
+    H --> J[Start agent loop]
 ```
 
-当前实现是第一版规则路由：
+当前实现是两阶段路由：
 
 - MiniCode 本地读取 `.skills/*.md`，解析 frontmatter 和正文。
-- Router 用任务文本匹配 `triggers`、`tags`、`intents`、skill 名称和 description。
+- 第一阶段 `MetadataSkillRetriever` 用任务文本匹配 `triggers`、`tags`、`intents`、skill 名称和 description，粗召回 topK。
+- 第二阶段 `LlmSkillRanker` 把候选 skill 的压缩元信息交给 DeepSeek 精排，选出最终注入 prompt 的 topN。
+- 如果 LLM 精排失败，会退回本地规则精排并在 run log 的 `rerank_error` 中记录原因。
 - 默认最多注入 `2` 个 skill，可用 `--max-skills` 调整。
+- 默认粗召回 `8` 个候选，可用 `--skill-recall-k` 调整。
 - 没有命中 skill 时，仍然会注入完整 tool 列表，模型依然能调用 tools。
-- run log 会记录 `skill_route`，方便后续 eval 对比 skill 是否有效。
+- run log 会记录 `skill_route.recalled`、`skill_route.selected`、`reranker` 和精排 token 用量，方便后续 eval 对比 skill 是否有效。
 
 ## 当前支持的 Tools
 
@@ -230,6 +231,7 @@ flowchart TD
 - `MINICODE_EVAL_OUTPUT`：eval 报告输出路径，默认 `.minicode/eval-report.json`
 - `MINICODE_SKILLS_DIR`：Skill Markdown 目录，默认 `.skills`
 - `MINICODE_MAX_SKILLS`：每次最多注入的 skill 数量，默认 `2`
+- `MINICODE_SKILL_RECALL_K`：精排前粗召回的 skill 候选数量，默认 `8`
 
 示例：
 

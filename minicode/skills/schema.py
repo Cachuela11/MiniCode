@@ -20,6 +20,7 @@ class SelectedSkill:
     skill: Skill
     score: int
     reason: str
+    recall_score: int = 0
 
     def to_log_dict(self) -> dict:
         data = asdict(self)
@@ -35,14 +36,52 @@ class SelectedSkill:
 
 
 @dataclass(frozen=True)
+class RecalledSkill:
+    skill: Skill
+    score: int
+    reason: str
+
+    def to_log_dict(self) -> dict:
+        return {
+            "skill": {
+                "name": self.skill.name,
+                "description": self.skill.description,
+                "tags": self.skill.tags,
+                "intents": self.skill.intents,
+                "tools": self.skill.tools,
+                "source_path": self.skill.source_path,
+            },
+            "score": self.score,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
 class SkillRoute:
     intent: str
+    recalled: list[RecalledSkill] = field(default_factory=list)
     selected: list[SelectedSkill] = field(default_factory=list)
     rejected: list[str] = field(default_factory=list)
+    reranker: str = "none"
+    rerank_token_usage: dict[str, int] = field(default_factory=dict)
+    rerank_error: str = ""
 
     def to_log_dict(self) -> dict:
         return {
             "intent": self.intent,
+            "recalled": [item.to_log_dict() for item in self.recalled],
             "selected": [item.to_log_dict() for item in self.selected],
             "rejected": self.rejected,
+            "reranker": self.reranker,
+            "rerank_token_usage": self.rerank_token_usage,
+            "rerank_error": self.rerank_error,
         }
+
+
+@dataclass(frozen=True)
+class RankResult:
+    intent: str
+    selected: list[SelectedSkill] = field(default_factory=list)
+    reranker: str = "none"
+    token_usage: dict[str, int] = field(default_factory=dict)
+    error: str = ""
