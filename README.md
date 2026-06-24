@@ -139,7 +139,7 @@ Skill 是给模型看的工作手册，不是可执行函数。Tool 负责真正
 ```mermaid
 flowchart TD
     A[User task] --> B[Load .skills/*.md]
-    B --> C[Stage 1: metadata recall topK]
+    B --> C[Stage 1: metadata recall topK<br/>triggers +5<br/>intents +3<br/>tags +2<br/>name +1<br/>description +1]
     C --> D[Stage 2: DeepSeek rerank topN]
     D --> E{Selected skills?}
     E -->|yes| F[Inject selected skill docs]
