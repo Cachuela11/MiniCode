@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from .context import build_initial_context
+from .context import ContextConfig, ContextManager, build_initial_context
 from .llm import LLMResponse
 from .observability import FileSnapshot, RunLog, StepLog, TestResult, Timer, TokenUsage, summarize_messages
 from .sandbox import DockerSandbox
@@ -44,6 +44,12 @@ class AgentConfig:
     skills_enabled: bool = True
     max_skills: int = 2
     skill_recall_k: int = 8
+    context_artifact_dir: str = ".minicode/context-artifacts"
+    observation_inline_limit: int = 6000
+    observation_preview_chars: int = 1200
+    context_history_char_limit: int = 24000
+    context_keep_recent_messages: int = 6
+    context_note_char_limit: int = 6000
 
 
 @dataclass
@@ -92,6 +98,18 @@ class CodingAgent:
                     total_tokens=skill_route.rerank_token_usage.get("total_tokens", 0),
                 )
             )
+        context_manager = ContextManager(
+            workspace=self.sandbox.workspace,
+            config=ContextConfig(
+                artifact_dir=self.config.context_artifact_dir,
+                observation_inline_limit=self.config.observation_inline_limit,
+                observation_preview_chars=self.config.observation_preview_chars,
+                history_char_limit=self.config.context_history_char_limit,
+                keep_recent_messages=self.config.context_keep_recent_messages,
+                note_char_limit=self.config.context_note_char_limit,
+            ),
+        )
+        self.tools.set_context_manager(context_manager)
         messages: list[dict[str, str]] = [
             {
                 "role": "system",
@@ -108,6 +126,7 @@ class CodingAgent:
         transcript: list[dict[str, Any]] = []
 
         for step in range(1, self.config.max_steps + 1):
+            messages = context_manager.compact_messages(messages)
             step_timer = Timer()
             model_input_summary = summarize_messages(messages)
             llm_response = self.llm.chat_response(model=self.config.model, messages=messages)
@@ -142,6 +161,7 @@ class CodingAgent:
                 run_log.token_usage.add(llm_response.token_usage)
                 run_log.answer = answer
                 run_log.final_test_result = self._run_final_test()
+                run_log.context = context_manager.to_log_dict()
                 run_log.duration_ms = run_timer.elapsed_ms()
                 return AgentResult(
                     answer=answer,
@@ -151,8 +171,15 @@ class CodingAgent:
                 )
 
             tool_result = self.tools.execute(str(name), args)
-            observation = tool_result.output
             modified_files = file_snapshot.diff()
+            context_event = context_manager.record_observation(
+                step=step,
+                tool_name=str(name),
+                output=tool_result.output,
+                exit_code=tool_result.exit_code,
+                modified_files=modified_files,
+            )
+            observation = context_event.message_content
             run_log.steps.append(
                 StepLog(
                     step=step,
@@ -170,6 +197,7 @@ class CodingAgent:
                     duration_ms=step_timer.elapsed_ms(),
                     dangerous_command=tool_result.dangerous_command,
                     invalid_command=tool_result.invalid_command,
+                    context_event=context_event.to_log_dict(),
                 )
             )
             run_log.token_usage.add(llm_response.token_usage)
@@ -180,6 +208,7 @@ class CodingAgent:
         answer = f"Stopped after {self.config.max_steps} steps without finish."
         run_log.answer = answer
         run_log.final_test_result = self._run_final_test()
+        run_log.context = context_manager.to_log_dict()
         run_log.duration_ms = run_timer.elapsed_ms()
         return AgentResult(
             answer=answer,

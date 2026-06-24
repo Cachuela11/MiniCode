@@ -108,6 +108,41 @@ def main(argv: list[str] | None = None) -> int:
         default=int(os.getenv("MINICODE_SKILL_RECALL_K", "8")),
         help="Number of candidate skills to recall before reranking.",
     )
+    parser.add_argument(
+        "--context-artifact-dir",
+        default=os.getenv("MINICODE_CONTEXT_ARTIFACT_DIR", ".minicode/context-artifacts"),
+        help="Directory for externalized context artifacts.",
+    )
+    parser.add_argument(
+        "--observation-inline-limit",
+        type=int,
+        default=int(os.getenv("MINICODE_OBSERVATION_INLINE_LIMIT", "6000")),
+        help="Inline tool observations up to this many characters.",
+    )
+    parser.add_argument(
+        "--observation-preview-chars",
+        type=int,
+        default=int(os.getenv("MINICODE_OBSERVATION_PREVIEW_CHARS", "1200")),
+        help="Preview characters kept when a tool observation is externalized.",
+    )
+    parser.add_argument(
+        "--context-history-char-limit",
+        type=int,
+        default=int(os.getenv("MINICODE_CONTEXT_HISTORY_CHAR_LIMIT", "24000")),
+        help="Prompt history character budget before detached notes are inserted.",
+    )
+    parser.add_argument(
+        "--context-keep-recent-messages",
+        type=int,
+        default=int(os.getenv("MINICODE_CONTEXT_KEEP_RECENT_MESSAGES", "6")),
+        help="Recent messages to keep verbatim after history compaction.",
+    )
+    parser.add_argument(
+        "--context-note-char-limit",
+        type=int,
+        default=int(os.getenv("MINICODE_CONTEXT_NOTE_CHAR_LIMIT", "6000")),
+        help="Maximum characters for detached structured context notes.",
+    )
     args = parser.parse_args(argv)
 
     workspace = Path(args.workspace).resolve()
@@ -134,6 +169,12 @@ def main(argv: list[str] | None = None) -> int:
             skills_enabled=not args.disable_skills,
             max_skills=args.max_skills,
             skill_recall_k=args.skill_recall_k,
+            context_artifact_dir=args.context_artifact_dir,
+            observation_inline_limit=args.observation_inline_limit,
+            observation_preview_chars=args.observation_preview_chars,
+            context_history_char_limit=args.context_history_char_limit,
+            context_keep_recent_messages=args.context_keep_recent_messages,
+            context_note_char_limit=args.context_note_char_limit,
         )
         print(json.dumps(report.summary, indent=2, ensure_ascii=False))
         print(f"Eval report written to {args.eval_output}")
@@ -152,6 +193,12 @@ def main(argv: list[str] | None = None) -> int:
             skills_enabled=not args.disable_skills,
             max_skills=args.max_skills,
             skill_recall_k=args.skill_recall_k,
+            context_artifact_dir=args.context_artifact_dir,
+            observation_inline_limit=args.observation_inline_limit,
+            observation_preview_chars=args.observation_preview_chars,
+            context_history_char_limit=args.context_history_char_limit,
+            context_keep_recent_messages=args.context_keep_recent_messages,
+            context_note_char_limit=args.context_note_char_limit,
         ),
         skill_catalog=skill_catalog,
     )

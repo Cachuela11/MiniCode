@@ -64,6 +64,12 @@ def run_eval(
     skills_enabled: bool,
     max_skills: int,
     skill_recall_k: int,
+    context_artifact_dir: str = ".minicode/context-artifacts",
+    observation_inline_limit: int = 6000,
+    observation_preview_chars: int = 1200,
+    context_history_char_limit: int = 24000,
+    context_keep_recent_messages: int = 6,
+    context_note_char_limit: int = 6000,
 ) -> EvalReport:
     output_path = output_path.resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -97,6 +103,12 @@ def run_eval(
                 skills_enabled=skills_enabled,
                 max_skills=max_skills,
                 skill_recall_k=skill_recall_k,
+                context_artifact_dir=context_artifact_dir,
+                observation_inline_limit=observation_inline_limit,
+                observation_preview_chars=observation_preview_chars,
+                context_history_char_limit=context_history_char_limit,
+                context_keep_recent_messages=context_keep_recent_messages,
+                context_note_char_limit=context_note_char_limit,
             ),
             skill_catalog=skill_catalog,
         )

@@ -120,7 +120,7 @@ MiniCode/
 - `minicode/tools.py`：Tool runtime。注册并执行当前支持的 tools，统一返回 `ToolResult`。
 - `minicode/sandbox.py`：Docker sandbox。负责把命令放进 Docker 的 `/workspace` 中执行，并收集 stdout、stderr、exit code、耗时和权限信息。
 - `minicode/permissions.py`：命令权限策略。对危险命令做 `allow`、`ask`、`deny` 判断，并支持 `never`、`ask`、`always` 三种审批模式。
-- `minicode/context.py`：初始上下文构建，目前会读取 workspace 的基础文件列表。
+- `minicode/context.py`：上下文构建与压缩。负责初始文件列表、大 observation 外置、占位预览、结构化 notes 和历史超限压缩。
 - `minicode/observability.py`：结构化日志模型。记录每一步的模型输入摘要、action、tool 参数、权限决策、输出、修改文件、token 和耗时。
 - `minicode/eval.py`：内置 eval 任务集和指标汇总。用于衡量任务成功率、测试通过率、tool 调用次数、危险命令等。
 - `minicode/harness.py`：后续 harness 占位。未来用于自动判断项目类型、运行验证命令和驱动修复循环。
@@ -128,7 +128,7 @@ MiniCode/
 - `minicode/skills/schema.py`：定义 `Skill`、`SelectedSkill`、`SkillRoute` 等数据结构。
 - `minicode/skills/loader.py`：读取 `.skills/*.md`，解析 frontmatter 和正文。
 - `minicode/skills/catalog.py`：管理已加载的 skill，提供按名称查询和枚举能力。
-- `minicode/skills/router.py`：第一版规则路由器，根据任务文本、triggers、tags、intents 选择相关 skill。
+- `minicode/skills/router.py`：Skill 路由总控。先做元信息粗召回，再交给 DeepSeek 精排候选 skill。
 - `minicode/skills/prompt.py`：把选中的 skill 渲染成 prompt 文本，注入给模型。
 - `minicode/evolution.py`：后续自我进化占位。未来用于反思失败案例、沉淀策略和生成改进建议。
 
@@ -160,6 +160,45 @@ flowchart TD
 - 默认粗召回 `8` 个候选，可用 `--skill-recall-k` 调整。
 - 没有命中 skill 时，仍然会注入完整 tool 列表，模型依然能调用 tools。
 - run log 会记录 `skill_route.recalled`、`skill_route.selected`、`reranker` 和精排 token 用量，方便后续 eval 对比 skill 是否有效。
+
+## 上下文压缩
+
+当前实现了一版分层上下文治理，用来避免长会话里把大段 tool 输出反复塞回 prompt。
+
+```mermaid
+flowchart TD
+    A[Tool observation] --> B{chars <= inline limit?}
+    B -->|yes| C[Inline observation]
+    B -->|no| D[Write full result to context artifact]
+    D --> E[Return placeholder + preview]
+    C --> F[Append structured note]
+    E --> F
+    F --> G{history over budget?}
+    G -->|no| H[Next LLM call]
+    G -->|yes| I[Detach older messages]
+    I --> J[Insert structured notes summary]
+    J --> H
+    H --> K{Need full detail?}
+    K -->|yes| L[read_context_artifact]
+    K -->|no| M[Continue]
+```
+
+- 小 observation 会直接进入下一轮模型上下文。
+- 大 observation 会被写入 `.minicode/context-artifacts/<run_id>/obs-0001.txt` 这类 artifact 文件。
+- prompt 里只保留 `[[context_artifact:obs-0001]]`、统计信息和摘要预览。
+- 模型需要全文时，可以调用 `read_context_artifact` 按行读取。
+- 如果消息历史超过预算，MiniCode 会把较早的 action / observation 脱离出 prompt，只保留结构化 notes 和最近几轮消息。
+- run log 的 `context` 字段会记录 artifact、notes、compaction 事件。
+
+当前策略总结：
+
+- tool 执行后先处理本次 observation：小结果直接 inline，大结果写入 artifact 后用占位符和预览替换。
+- 模型调用前再检查整段 messages：如果超过 `MINICODE_CONTEXT_HISTORY_CHAR_LIMIT`，就把早期 action / observation 脱离成 structured notes。
+- artifact 占位符用于保存和索引单次大结果，notes 用于压缩早期多轮历史过程。
+- 大 observation 的原文会保存在 `.minicode/context-artifacts`，后续可通过 `read_context_artifact` 按行读回。
+- 小 observation 当前不会额外写 artifact；如果后续历史超限，它会从 prompt 原文中脱离，只在 notes 中保留摘要。
+- 最近几轮消息会原样保留，默认保留 `6` 条，避免模型丢失当前正在处理的局部上下文。
+- 这版先保证长会话能稳定降 token；明天可以继续优化为“所有 observation 都有 artifact，只是小结果同时 inline”。
 
 ## 当前支持的 Tools
 
@@ -202,6 +241,12 @@ flowchart TD
   - 执行位置：Docker `/workspace`。
   - 安全策略：先经过 `CommandPolicy`，再决定是否执行。
 
+- `read_context_artifact`
+  - 参数：`artifact_id`、`start_line`、`limit`
+  - 作用：按行读取被外置化的大型 tool observation。
+  - 执行位置：本地 context artifact 存储。
+  - 安全策略：只能读取本次运行中由 MiniCode 生成的 artifact id，不能传任意文件路径。
+
 - `run_shell`
   - 参数：`command`
   - 作用：兜底 shell tool，用于结构化 tool 不够用的情况。
@@ -232,6 +277,12 @@ flowchart TD
 - `MINICODE_SKILLS_DIR`：Skill Markdown 目录，默认 `.skills`
 - `MINICODE_MAX_SKILLS`：每次最多注入的 skill 数量，默认 `2`
 - `MINICODE_SKILL_RECALL_K`：精排前粗召回的 skill 候选数量，默认 `8`
+- `MINICODE_CONTEXT_ARTIFACT_DIR`：大 observation 外置存储目录，默认 `.minicode/context-artifacts`
+- `MINICODE_OBSERVATION_INLINE_LIMIT`：tool observation 小于等于该字符数时直接进入上下文，默认 `6000`
+- `MINICODE_OBSERVATION_PREVIEW_CHARS`：大 observation 外置后保留在 prompt 中的预览字符数，默认 `1200`
+- `MINICODE_CONTEXT_HISTORY_CHAR_LIMIT`：消息历史超过该字符数后触发脱离压缩，默认 `24000`
+- `MINICODE_CONTEXT_KEEP_RECENT_MESSAGES`：历史脱离时保留最近消息数，默认 `6`
+- `MINICODE_CONTEXT_NOTE_CHAR_LIMIT`：结构化 notes 摘要最大字符数，默认 `6000`
 
 示例：
 

@@ -39,6 +39,7 @@ class StepLog:
     duration_ms: int
     dangerous_command: bool = False
     invalid_command: bool = False
+    context_event: dict[str, Any] | None = None
 
 
 @dataclass
@@ -59,6 +60,7 @@ class RunLog:
     duration_ms: int = 0
     answer: str = ""
     skill_route: dict[str, Any] | None = None
+    context: dict[str, Any] = field(default_factory=dict)
     steps: list[StepLog] = field(default_factory=list)
     token_usage: TokenUsage = field(default_factory=TokenUsage)
     final_test_result: TestResult | None = None

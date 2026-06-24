@@ -26,16 +26,21 @@ ToolHandler = Callable[[dict[str, Any]], ToolResult]
 
 
 class ToolRegistry:
-    def __init__(self, workspace: Path, sandbox: DockerSandbox):
+    def __init__(self, workspace: Path, sandbox: DockerSandbox, context_manager: Any | None = None):
         self.workspace = workspace.resolve()
         self.sandbox = sandbox
+        self.context_manager = context_manager
         self._tools: dict[str, ToolHandler] = {
             "run_shell": self._run_shell,
             "list_files": self._list_files,
             "read_file": self._read_file,
             "write_file": self._write_file,
             "run_tests": self._run_tests,
+            "read_context_artifact": self._read_context_artifact,
         }
+
+    def set_context_manager(self, context_manager: Any) -> None:
+        self.context_manager = context_manager
 
     def names(self) -> list[str]:
         return sorted(self._tools)
@@ -48,6 +53,7 @@ class ToolRegistry:
                 '- read_file: {"path": "relative/path", "start_line": 1, "limit": 200}',
                 '- write_file: {"path": "relative/path", "content": "new file content", "overwrite": false}',
                 '- run_tests: {"command": "test command, default: python -m pytest"}',
+                '- read_context_artifact: {"artifact_id": "obs-0001", "start_line": 1, "limit": 200}',
                 '- finish: {"answer": "concise final answer for the user"} inside args, e.g. {"action":"finish","args":{"answer":"..."}}',
             ]
         )
@@ -132,6 +138,23 @@ class ToolRegistry:
     def _run_tests(self, args: dict[str, Any]) -> ToolResult:
         command = str(args.get("command", "python -m pytest")).strip() or "python -m pytest"
         return _sandbox_result_to_tool_result(self.sandbox.run(command))
+
+    def _read_context_artifact(self, args: dict[str, Any]) -> ToolResult:
+        if self.context_manager is None:
+            message = "ERROR: context artifact storage is not available."
+            return ToolResult(False, message, stderr=message, exit_code=1)
+        artifact_id = str(args.get("artifact_id", "")).strip()
+        if not artifact_id:
+            message = "ERROR: read_context_artifact requires args.artifact_id."
+            return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
+        start_line = _as_int(args.get("start_line", 1), default=1, minimum=1, maximum=1_000_000)
+        limit = _as_int(args.get("limit", 200), default=200, minimum=1, maximum=1000)
+        try:
+            output = self.context_manager.read_artifact(artifact_id, start_line=start_line, limit=limit)
+        except Exception as exc:
+            message = f"ERROR: {exc}"
+            return ToolResult(False, message, stderr=message, exit_code=1)
+        return ToolResult(True, output, stdout=output, exit_code=0)
 
     def _resolve_workspace_path(self, raw_path: str) -> Path:
         if not raw_path:
