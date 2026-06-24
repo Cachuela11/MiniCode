@@ -79,6 +79,12 @@ MiniCode/
   README.md
   .env.example
   .gitignore
+  .skills/
+    python_test_repair.md
+    add_api.md
+    refactor_function.md
+    input_validation.md
+    code_review.md
   minicode/
     __main__.py
     __init__.py
@@ -93,12 +99,19 @@ MiniCode/
     eval.py
     harness.py
     memory.py
-    skills.py
+    skills/
+      __init__.py
+      schema.py
+      loader.py
+      catalog.py
+      router.py
+      prompt.py
     evolution.py
 ```
 
 - `pyproject.toml`：Python 项目配置，定义包名、版本、Python 版本要求和 `minicode` 命令行入口。
 - `.env.example`：环境变量示例，包含 DeepSeek、Docker、日志和 eval 相关配置。
+- `.skills/`：Skill 内容库。这里的 Markdown 文件是给模型看的任务工作流说明，不是 Python 执行代码。
 - `.gitignore`：忽略 `.minicode/`、Python 缓存和安装元数据。`.minicode/` 是本机持久运行数据目录，但默认不提交到 Git。
 - `minicode/__main__.py`：支持 `python -m minicode` 的入口文件，只负责转发到 CLI。
 - `minicode/cli.py`：命令行入口，解析参数，创建 `DeepSeekClient`、`DockerSandbox`、`CodingAgent`，并处理 `--check`、`--eval`、`--run-log` 等模式。
@@ -112,8 +125,40 @@ MiniCode/
 - `minicode/eval.py`：内置 eval 任务集和指标汇总。用于衡量任务成功率、测试通过率、tool 调用次数、危险命令等。
 - `minicode/harness.py`：后续 harness 占位。未来用于自动判断项目类型、运行验证命令和驱动修复循环。
 - `minicode/memory.py`：后续 memory 占位。未来用于持久化经验、项目偏好和历史结果。
-- `minicode/skills.py`：后续 skill 占位。未来用于加载任务工作流，比如调试、代码审查、测试修复等。
+- `minicode/skills/schema.py`：定义 `Skill`、`SelectedSkill`、`SkillRoute` 等数据结构。
+- `minicode/skills/loader.py`：读取 `.skills/*.md`，解析 frontmatter 和正文。
+- `minicode/skills/catalog.py`：管理已加载的 skill，提供按名称查询和枚举能力。
+- `minicode/skills/router.py`：第一版规则路由器，根据任务文本、triggers、tags、intents 选择相关 skill。
+- `minicode/skills/prompt.py`：把选中的 skill 渲染成 prompt 文本，注入给模型。
 - `minicode/evolution.py`：后续自我进化占位。未来用于反思失败案例、沉淀策略和生成改进建议。
+
+## Skill 体系
+
+Skill 是给模型看的工作手册，不是可执行函数。Tool 负责真正执行动作，Skill 负责指导模型按什么步骤使用 tools。
+
+```mermaid
+flowchart TD
+    A[User task] --> B[SkillCatalog loads .skills/*.md]
+    B --> C[RuleBasedSkillRouter scores skills]
+    C --> D{Any skill selected?}
+    D -->|yes| E[Render selected skill workflow]
+    D -->|no| F[Render no specific skill selected]
+    E --> G[Build prompt with tools and skills]
+    F --> G
+    G --> H[DeepSeek returns one JSON action]
+    H --> I[ToolRegistry executes action]
+    I --> J[Observation returned to model]
+    J --> H
+    H -->|finish| K[Run log records skill_route]
+```
+
+当前实现是第一版规则路由：
+
+- MiniCode 本地读取 `.skills/*.md`，解析 frontmatter 和正文。
+- Router 用任务文本匹配 `triggers`、`tags`、`intents`、skill 名称和 description。
+- 默认最多注入 `2` 个 skill，可用 `--max-skills` 调整。
+- 没有命中 skill 时，仍然会注入完整 tool 列表，模型依然能调用 tools。
+- run log 会记录 `skill_route`，方便后续 eval 对比 skill 是否有效。
 
 ## 当前支持的 Tools
 
@@ -183,6 +228,8 @@ MiniCode/
 - `MINICODE_RUN_LOG`：结构化运行日志输出目录或文件路径，默认 `.minicode/runs`
 - `MINICODE_FINAL_TEST_COMMAND`：agent 结束后运行的最终测试命令
 - `MINICODE_EVAL_OUTPUT`：eval 报告输出路径，默认 `.minicode/eval-report.json`
+- `MINICODE_SKILLS_DIR`：Skill Markdown 目录，默认 `.skills`
+- `MINICODE_MAX_SKILLS`：每次最多注入的 skill 数量，默认 `2`
 
 示例：
 

@@ -11,6 +11,7 @@ from .llm import DeepSeekClient
 from .observability import RunLog
 from .permissions import ApprovalProvider
 from .sandbox import DockerSandbox
+from .skills import SkillCatalog
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,9 @@ def run_eval(
     approvals: ApprovalProvider,
     output_path: Path,
     max_steps: int,
+    skills_dir: Path,
+    skills_enabled: bool,
+    max_skills: int,
 ) -> EvalReport:
     output_path = output_path.resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -66,6 +70,7 @@ def run_eval(
     logs_dir = output_path.parent / "eval-logs"
     runs_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
+    skill_catalog = SkillCatalog.load(skills_dir) if skills_enabled else SkillCatalog.empty()
 
     runs: list[EvalRun] = []
     for case in _cases():
@@ -88,7 +93,10 @@ def run_eval(
                 model=model,
                 max_steps=max_steps,
                 final_test_command=case.test_command,
+                skills_enabled=skills_enabled,
+                max_skills=max_skills,
             ),
+            skill_catalog=skill_catalog,
         )
         result = agent.run(case.task)
         run_log = result.run_log

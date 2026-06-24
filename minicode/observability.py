@@ -58,6 +58,7 @@ class RunLog:
     started_at: str
     duration_ms: int = 0
     answer: str = ""
+    skill_route: dict[str, Any] | None = None
     steps: list[StepLog] = field(default_factory=list)
     token_usage: TokenUsage = field(default_factory=TokenUsage)
     final_test_result: TestResult | None = None

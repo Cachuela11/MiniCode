@@ -9,6 +9,7 @@ from .context import build_initial_context
 from .llm import LLMResponse
 from .observability import FileSnapshot, RunLog, StepLog, TestResult, Timer, summarize_messages
 from .sandbox import DockerSandbox
+from .skills import RuleBasedSkillRouter, SkillCatalog, SkillRoute, render_skill_prompt
 from .tools import ToolRegistry
 
 
@@ -25,6 +26,9 @@ answer inside args.answer, not at the top level.
 Available actions:
 {tool_descriptions}
 
+Relevant skills:
+{skill_instructions}
+
 Example:
 {{"thought":"I should inspect the workspace.","action":"list_files","args":{{"path":".","max_depth":2}}}}
 Final answer example:
@@ -37,6 +41,8 @@ class AgentConfig:
     model: str
     max_steps: int = 8
     final_test_command: str | None = None
+    skills_enabled: bool = True
+    max_skills: int = 2
 
 
 @dataclass
@@ -59,11 +65,13 @@ class CodingAgent:
         sandbox: DockerSandbox,
         config: AgentConfig,
         tools: ToolRegistry | None = None,
+        skill_catalog: SkillCatalog | None = None,
     ):
         self.llm = llm
         self.sandbox = sandbox
         self.config = config
         self.tools = tools or ToolRegistry(workspace=sandbox.workspace, sandbox=sandbox)
+        self.skill_catalog = skill_catalog or SkillCatalog.empty()
 
     def run(self, task: str) -> AgentResult:
         run_timer = Timer()
@@ -73,10 +81,15 @@ class CodingAgent:
             model=self.config.model,
             started_at=datetime.now(timezone.utc).isoformat(),
         )
+        skill_route = self._route_skills(task)
+        run_log.skill_route = skill_route.to_log_dict()
         messages: list[dict[str, str]] = [
             {
                 "role": "system",
-                "content": SYSTEM_PROMPT_TEMPLATE.format(tool_descriptions=self.tools.describe()),
+                "content": SYSTEM_PROMPT_TEMPLATE.format(
+                    tool_descriptions=self.tools.describe(),
+                    skill_instructions=render_skill_prompt(skill_route),
+                ),
             },
             {
                 "role": "user",
@@ -179,6 +192,12 @@ class CodingAgent:
             exit_code=result.exit_code,
             duration_ms=timer.elapsed_ms(),
         )
+
+    def _route_skills(self, task: str) -> SkillRoute:
+        if not self.config.skills_enabled:
+            return SkillRoute(intent="disabled", rejected=self.skill_catalog.names())
+        router = RuleBasedSkillRouter(self.skill_catalog, max_skills=self.config.max_skills)
+        return router.route(task)
 
 
 def _parse_action(raw: str) -> dict[str, Any]:

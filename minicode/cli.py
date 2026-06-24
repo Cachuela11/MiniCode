@@ -12,6 +12,7 @@ from .eval import run_eval
 from .llm import DeepSeekClient
 from .permissions import AlwaysApprove, ConsoleApproval, NeverApprove
 from .sandbox import DockerSandbox
+from .skills import SkillCatalog
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -85,12 +86,29 @@ def main(argv: list[str] | None = None) -> int:
         default=os.getenv("MINICODE_APPROVAL", "never"),
         help="How to handle commands that need approval.",
     )
+    parser.add_argument(
+        "--skills-dir",
+        default=os.getenv("MINICODE_SKILLS_DIR", ".skills"),
+        help="Directory containing skill markdown files.",
+    )
+    parser.add_argument(
+        "--disable-skills",
+        action="store_true",
+        help="Disable skill routing and prompt injection.",
+    )
+    parser.add_argument(
+        "--max-skills",
+        type=int,
+        default=int(os.getenv("MINICODE_MAX_SKILLS", "2")),
+        help="Maximum selected skills to inject into the prompt.",
+    )
     args = parser.parse_args(argv)
 
     workspace = Path(args.workspace).resolve()
     llm = _build_llm(args)
     approvals = _build_approval_provider(args.approval)
     sandbox = DockerSandbox(workspace=workspace, image=args.docker_image, approvals=approvals)
+    skill_catalog = SkillCatalog.load(Path(args.skills_dir)) if not args.disable_skills else SkillCatalog.empty()
 
     if args.check:
         return _check_environment(llm=llm, sandbox=sandbox, model=args.model)
@@ -106,6 +124,9 @@ def main(argv: list[str] | None = None) -> int:
             approvals=approvals,
             output_path=Path(args.eval_output),
             max_steps=args.max_steps,
+            skills_dir=Path(args.skills_dir),
+            skills_enabled=not args.disable_skills,
+            max_skills=args.max_skills,
         )
         print(json.dumps(report.summary, indent=2, ensure_ascii=False))
         print(f"Eval report written to {args.eval_output}")
@@ -121,7 +142,10 @@ def main(argv: list[str] | None = None) -> int:
             model=args.model,
             max_steps=args.max_steps,
             final_test_command=args.final_test_command,
+            skills_enabled=not args.disable_skills,
+            max_skills=args.max_skills,
         ),
+        skill_catalog=skill_catalog,
     )
 
     try:
