@@ -163,33 +163,52 @@ flowchart TD
 
 ## 多层 Context
 
-当前 context 设计为 L0-L3，由静态到动态逐层加载。L3 是最外层动态工作记忆，只包含两类东西：action JSON 和 observation。
+当前 context 设计为 L0-L3。前三层在第一次调用模型前构造，L3 在 agent loop 中持续更新。
+
+Agent loop 中的 context 工作流程：
 
 ```mermaid
 flowchart TD
-    A[User task] --> L0[L0 runtime contract<br/>system role + JSON protocol + tools]
-    A --> L1[L1 workspace file index<br/>Docker pwd + bounded file paths]
-    A --> L2[L2 initial skills<br/>two-stage skill router]
-    L0 --> P[First agent prompt]
-    L1 --> P
-    L2 --> P
-    P --> LOOP[Agent loop]
-    LOOP --> L3[L3 dynamic working memory<br/>action JSON + observation]
-    L3 --> C{observation large?}
-    C -->|no| I[Inline observation]
-    C -->|yes| A4[Artifact reference<br/>placeholder + preview]
-    I --> L3
-    A4 --> L3
-    LOOP --> B{history over budget?}
-    B -->|yes| N[Structured notes + recent messages]
-    N --> L3
-    B -->|no| LOOP
-    LOOP --> D{need missing context?}
-    D -->|skill| S[search_skills -> load_skill]
-    D -->|memory| M[search_memory -> load_memory]
-    S --> L3
-    M --> L3
-    L3 --> LOOP
+    A[User task] --> B[Route initial skills]
+    B --> C[Build first messages<br/>L0 + L1 + L2]
+    C --> D[Before model call:<br/>compact messages if over budget]
+    D --> E[LLM returns JSON action]
+    E --> F{Action type}
+    F -->|finish| G[Write run log<br/>including context state]
+    F -->|tool call| H[Execute tool]
+    H --> I[Record internal step note]
+    I --> J{Observation large?}
+    J -->|no| K[Inline observation]
+    J -->|yes| L[Write artifact<br/>return placeholder + preview]
+    K --> M[Append action + observation to messages]
+    L --> M
+    M --> D
+```
+
+L0-L3 分层架构：
+
+```mermaid
+mindmap
+  root((MiniCode Context))
+    L0 Runtime Contract
+      System role
+      JSON action protocol
+      Tool list
+      Context policy
+    L1 Workspace File Index
+      Docker pwd
+      Bounded file paths
+      No file content
+    L2 Initial Skills
+      Two-stage router
+      Selected skill docs
+      Before first action
+    L3 Dynamic Working Memory
+      Action JSON
+      Observation
+      Inline small output
+      Artifact placeholder for large output
+      Structured notes after compaction
 ```
 
 层级说明：
@@ -197,7 +216,7 @@ flowchart TD
 - `L0 runtime contract`：固定系统规则、JSON action 协议、tool 列表和 context 使用策略。
 - `L1 workspace file index`：运行开始时在 Docker `/workspace` 里读取当前工作目录和最多 200 个文件路径，不包含文件内容。
 - `L2 initial skills`：运行开始前通过两阶段 skill router 选择少量 skill 注入 prompt。
-- `L3 dynamic working memory`：agent loop 中持续更新的动态上下文，只包含完整 action JSON 和 observation。`read_file`、`run_tests`、`load_skill`、`load_memory`、`read_context_artifact` 等 tool 的返回内容都只是 observation 的不同来源，不单独作为一层。
+- `L3 dynamic working memory`：agent loop 中持续更新的动态上下文，只包含完整 action JSON 和 observation。`read_file`、`run_tests`、`load_skill`、`load_memory`、`read_context_artifact` 等 tool 的返回内容都只是 observation 的不同来源。
 
 当前策略：
 
