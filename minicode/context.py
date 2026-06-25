@@ -3,12 +3,54 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .sandbox import DockerSandbox
+
+
+CONTEXT_LAYERS: list[dict[str, str]] = [
+    {
+        "level": "L0",
+        "name": "runtime contract",
+        "load": "static",
+        "content": "system role, JSON action protocol, tool list, context policy",
+    },
+    {
+        "level": "L1",
+        "name": "workspace file index",
+        "load": "static at run start",
+        "content": "current Docker working directory and bounded file path list",
+    },
+    {
+        "level": "L2",
+        "name": "initial skill context",
+        "load": "task-routed before first model call",
+        "content": "top selected skill docs from two-stage skill router",
+    },
+    {
+        "level": "L3",
+        "name": "dynamic working memory",
+        "load": "updated during the agent loop",
+        "content": "full action JSON and observations; observations may come from files, shell, tests, artifact reads, skill loads, or memory loads",
+    },
+]
+
+
+def render_context_layer_prompt() -> str:
+    rows = [
+        "Context layers:",
+        "- L0 static runtime contract: always present and cache-friendly.",
+        "- L1 workspace file index: Docker pwd plus a bounded list of file paths, not file contents.",
+        "- L2 initial skills: task-routed skill docs injected before the first action.",
+        "- L3 dynamic working memory: recent action JSON plus observations. Tool results from files, shell, tests, skills, and memory are all observations.",
+        "Large observations may be represented by artifact placeholders; old action/observation history may be represented by structured notes.",
+        "Use read_context_artifact, search_skills/load_skill, or search_memory/load_memory when you need a new observation that is not already in context.",
+    ]
+    return "\n".join(rows)
 
 
 def build_initial_context(sandbox: DockerSandbox) -> str:
@@ -199,6 +241,7 @@ class ContextManager:
     def to_log_dict(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
+            "layers": CONTEXT_LAYERS,
             "config": asdict(self.config),
             "artifact_root": str(self.artifact_root),
             "artifacts": [asdict(artifact) for artifact in self.artifacts.values()],
@@ -287,4 +330,4 @@ def _preview_text(text: str, limit: int) -> str:
 
 def _make_run_id() -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    return f"{stamp}-{os.getpid()}"
+    return f"{stamp}-{os.getpid()}-{uuid.uuid4().hex[:8]}"

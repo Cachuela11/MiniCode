@@ -5,8 +5,9 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from .context import ContextConfig, ContextManager, build_initial_context
+from .context import ContextConfig, ContextManager, build_initial_context, render_context_layer_prompt
 from .llm import LLMResponse
+from .memory import FileMemoryStore
 from .observability import FileSnapshot, RunLog, StepLog, TestResult, Timer, TokenUsage, summarize_messages
 from .sandbox import DockerSandbox
 from .skills import SkillCatalog, SkillRoute, TwoStageSkillRouter, render_skill_prompt
@@ -29,6 +30,8 @@ Available actions:
 Relevant skills:
 {skill_instructions}
 
+{context_layer_instructions}
+
 Example:
 {{"thought":"I should inspect the workspace.","action":"list_files","args":{{"path":".","max_depth":2}}}}
 Final answer example:
@@ -50,6 +53,7 @@ class AgentConfig:
     context_history_char_limit: int = 24000
     context_keep_recent_messages: int = 6
     context_note_char_limit: int = 6000
+    memory_dir: str = ".minicode/memory"
 
 
 @dataclass
@@ -77,8 +81,16 @@ class CodingAgent:
         self.llm = llm
         self.sandbox = sandbox
         self.config = config
-        self.tools = tools or ToolRegistry(workspace=sandbox.workspace, sandbox=sandbox)
         self.skill_catalog = skill_catalog or SkillCatalog.empty()
+        self.memory_store = FileMemoryStore(workspace=sandbox.workspace, memory_dir=config.memory_dir)
+        self.tools = tools or ToolRegistry(
+            workspace=sandbox.workspace,
+            sandbox=sandbox,
+            skill_catalog=self.skill_catalog,
+            memory_store=self.memory_store,
+        )
+        self.tools.set_skill_catalog(self.skill_catalog)
+        self.tools.set_memory_store(self.memory_store)
 
     def run(self, task: str) -> AgentResult:
         run_timer = Timer()
@@ -116,6 +128,7 @@ class CodingAgent:
                 "content": SYSTEM_PROMPT_TEMPLATE.format(
                     tool_descriptions=self.tools.describe(),
                     skill_instructions=render_skill_prompt(skill_route),
+                    context_layer_instructions=render_context_layer_prompt(),
                 ),
             },
             {

@@ -70,6 +70,7 @@ def run_eval(
     context_history_char_limit: int = 24000,
     context_keep_recent_messages: int = 6,
     context_note_char_limit: int = 6000,
+    memory_dir: str = ".minicode/memory",
 ) -> EvalReport:
     output_path = output_path.resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,6 +110,7 @@ def run_eval(
                 context_history_char_limit=context_history_char_limit,
                 context_keep_recent_messages=context_keep_recent_messages,
                 context_note_char_limit=context_note_char_limit,
+                memory_dir=memory_dir,
             ),
             skill_catalog=skill_catalog,
         )

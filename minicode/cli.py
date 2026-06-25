@@ -143,6 +143,11 @@ def main(argv: list[str] | None = None) -> int:
         default=int(os.getenv("MINICODE_CONTEXT_NOTE_CHAR_LIMIT", "6000")),
         help="Maximum characters for detached structured context notes.",
     )
+    parser.add_argument(
+        "--memory-dir",
+        default=os.getenv("MINICODE_MEMORY_DIR", ".minicode/memory"),
+        help="Directory containing project memory markdown/text files.",
+    )
     args = parser.parse_args(argv)
 
     workspace = Path(args.workspace).resolve()
@@ -175,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
             context_history_char_limit=args.context_history_char_limit,
             context_keep_recent_messages=args.context_keep_recent_messages,
             context_note_char_limit=args.context_note_char_limit,
+            memory_dir=args.memory_dir,
         )
         print(json.dumps(report.summary, indent=2, ensure_ascii=False))
         print(f"Eval report written to {args.eval_output}")
@@ -199,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
             context_history_char_limit=args.context_history_char_limit,
             context_keep_recent_messages=args.context_keep_recent_messages,
             context_note_char_limit=args.context_note_char_limit,
+            memory_dir=args.memory_dir,
         ),
         skill_catalog=skill_catalog,
     )

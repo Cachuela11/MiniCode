@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .memory import FileMemoryStore, NullMemory
 from .sandbox import DockerSandbox, SandboxResult
+from .skills import MetadataSkillRetriever, SkillCatalog
 
 
 @dataclass(frozen=True)
@@ -26,10 +28,19 @@ ToolHandler = Callable[[dict[str, Any]], ToolResult]
 
 
 class ToolRegistry:
-    def __init__(self, workspace: Path, sandbox: DockerSandbox, context_manager: Any | None = None):
+    def __init__(
+        self,
+        workspace: Path,
+        sandbox: DockerSandbox,
+        context_manager: Any | None = None,
+        skill_catalog: SkillCatalog | None = None,
+        memory_store: FileMemoryStore | NullMemory | None = None,
+    ):
         self.workspace = workspace.resolve()
         self.sandbox = sandbox
         self.context_manager = context_manager
+        self.skill_catalog = skill_catalog or SkillCatalog.empty()
+        self.memory_store = memory_store or NullMemory()
         self._tools: dict[str, ToolHandler] = {
             "run_shell": self._run_shell,
             "list_files": self._list_files,
@@ -37,10 +48,20 @@ class ToolRegistry:
             "write_file": self._write_file,
             "run_tests": self._run_tests,
             "read_context_artifact": self._read_context_artifact,
+            "search_skills": self._search_skills,
+            "load_skill": self._load_skill,
+            "search_memory": self._search_memory,
+            "load_memory": self._load_memory,
         }
 
     def set_context_manager(self, context_manager: Any) -> None:
         self.context_manager = context_manager
+
+    def set_skill_catalog(self, skill_catalog: SkillCatalog) -> None:
+        self.skill_catalog = skill_catalog
+
+    def set_memory_store(self, memory_store: FileMemoryStore | NullMemory) -> None:
+        self.memory_store = memory_store
 
     def names(self) -> list[str]:
         return sorted(self._tools)
@@ -54,6 +75,10 @@ class ToolRegistry:
                 '- write_file: {"path": "relative/path", "content": "new file content", "overwrite": false}',
                 '- run_tests: {"command": "test command, default: python -m pytest"}',
                 '- read_context_artifact: {"artifact_id": "obs-0001", "start_line": 1, "limit": 200}',
+                '- search_skills: {"query": "what you need help with", "limit": 5}',
+                '- load_skill: {"name": "skill_name", "max_chars": 4000}',
+                '- search_memory: {"query": "project fact or past lesson", "limit": 5}',
+                '- load_memory: {"memory_id": "memory-id", "max_chars": 4000}',
                 '- finish: {"answer": "concise final answer for the user"} inside args, e.g. {"action":"finish","args":{"answer":"..."}}',
             ]
         )
@@ -156,6 +181,125 @@ class ToolRegistry:
             return ToolResult(False, message, stderr=message, exit_code=1)
         return ToolResult(True, output, stdout=output, exit_code=0)
 
+    def _search_skills(self, args: dict[str, Any]) -> ToolResult:
+        query = str(args.get("query", "")).strip()
+        limit = _as_int(args.get("limit", 5), default=5, minimum=1, maximum=20)
+        if not query:
+            message = "ERROR: search_skills requires args.query."
+            return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
+        recalled = MetadataSkillRetriever(self.skill_catalog, top_k=limit).retrieve(query)
+        if not recalled:
+            output = "No matching skills found."
+            return ToolResult(True, output, stdout=output, exit_code=0)
+        rows = ["Matching skills:"]
+        for item in recalled:
+            skill = item.skill
+            rows.append(
+                "\n".join(
+                    [
+                        f"- name: {skill.name}",
+                        f"  score: {item.score}",
+                        f"  reason: {item.reason}",
+                        f"  description: {skill.description}",
+                        f"  tags: {', '.join(skill.tags) or 'none'}",
+                        f"  recommended_tools: {', '.join(skill.tools) or 'none'}",
+                    ]
+                )
+            )
+        rows.append("Use load_skill with the selected name to inject the full skill workflow.")
+        output = "\n".join(rows)
+        return ToolResult(True, output, stdout=output, exit_code=0)
+
+    def _load_skill(self, args: dict[str, Any]) -> ToolResult:
+        name = str(args.get("name", "")).strip()
+        max_chars = _as_int(args.get("max_chars", 4000), default=4000, minimum=200, maximum=12000)
+        if not name:
+            message = "ERROR: load_skill requires args.name."
+            return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
+        skill = self.skill_catalog.get(name)
+        if skill is None:
+            available = ", ".join(self.skill_catalog.names()) or "none"
+            message = f"ERROR: unknown skill {name!r}. Available skills: {available}"
+            return ToolResult(False, message, stderr=message, exit_code=1)
+        body = skill.body
+        truncated = False
+        if len(body) > max_chars:
+            body = body[: max_chars - 3] + "..."
+            truncated = True
+        output = "\n".join(
+            [
+                f"Dynamic skill loaded: {skill.name}",
+                f"Description: {skill.description}",
+                f"Tags: {', '.join(skill.tags) or 'none'}",
+                f"Intents: {', '.join(skill.intents) or 'none'}",
+                f"Recommended tools: {', '.join(skill.tools) or 'none'}",
+                f"Source: {skill.source_path}",
+                f"Truncated: {str(truncated).lower()}",
+                "",
+                body,
+            ]
+        )
+        return ToolResult(True, output, stdout=output, exit_code=0)
+
+    def _search_memory(self, args: dict[str, Any]) -> ToolResult:
+        query = str(args.get("query", "")).strip()
+        limit = _as_int(args.get("limit", 5), default=5, minimum=1, maximum=20)
+        if not query:
+            message = "ERROR: search_memory requires args.query."
+            return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
+        results = self.memory_store.search(query, limit=limit)
+        if not results:
+            output = "No matching memories found."
+            return ToolResult(True, output, stdout=output, exit_code=0)
+        rows = ["Matching memories:"]
+        for result in results:
+            item = result.item
+            preview = _compact_preview(item.body, limit=300)
+            rows.append(
+                "\n".join(
+                    [
+                        f"- memory_id: {item.memory_id}",
+                        f"  score: {result.score}",
+                        f"  reason: {result.reason}",
+                        f"  title: {item.title}",
+                        f"  tags: {', '.join(item.tags) or 'none'}",
+                        f"  preview: {preview}",
+                    ]
+                )
+            )
+        rows.append("Use load_memory with the selected memory_id to inject the full memory.")
+        output = "\n".join(rows)
+        return ToolResult(True, output, stdout=output, exit_code=0)
+
+    def _load_memory(self, args: dict[str, Any]) -> ToolResult:
+        memory_id = str(args.get("memory_id", "")).strip()
+        max_chars = _as_int(args.get("max_chars", 4000), default=4000, minimum=200, maximum=12000)
+        if not memory_id:
+            message = "ERROR: load_memory requires args.memory_id."
+            return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
+        item = self.memory_store.get(memory_id)
+        if item is None:
+            available = ", ".join(memory.memory_id for memory in self.memory_store.all()) or "none"
+            message = f"ERROR: unknown memory {memory_id!r}. Available memories: {available}"
+            return ToolResult(False, message, stderr=message, exit_code=1)
+        body = item.body
+        truncated = False
+        if len(body) > max_chars:
+            body = body[: max_chars - 3] + "..."
+            truncated = True
+        output = "\n".join(
+            [
+                f"Dynamic memory loaded: {item.memory_id}",
+                f"Title: {item.title}",
+                f"Tags: {', '.join(item.tags) or 'none'}",
+                f"Source: {item.source_path}",
+                f"Truncated: {str(truncated).lower()}",
+                "",
+                body,
+            ]
+        )
+        return ToolResult(True, output, stdout=output, exit_code=0)
+
     def _resolve_workspace_path(self, raw_path: str) -> Path:
         if not raw_path:
             raise ValueError("path is required")
@@ -186,3 +330,10 @@ def _as_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(maximum, parsed))
+
+
+def _compact_preview(value: str, limit: int = 300) -> str:
+    text = " ".join(value.split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
