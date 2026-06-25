@@ -188,11 +188,18 @@ flowchart TD
 L0-L3 分层架构：
 
 ```mermaid
-flowchart LR
-    L0[L0 Runtime Contract<br/>system role<br/>JSON action protocol<br/>tool list<br/>context policy]
-    L1[L1 Workspace File Index<br/>Docker pwd<br/>bounded file paths<br/>no file content]
-    L2[L2 Initial Skills<br/>two-stage router result<br/>selected skill docs<br/>before first action]
-    L3[L3 Dynamic Working Memory<br/>action JSON<br/>observation<br/>inline small output<br/>artifact placeholder for large output<br/>structured notes after compaction]
+flowchart TB
+    L0["L0 Runtime Contract<br/>system role · JSON action protocol · tool list · context policy"]
+    L1["L1 Workspace File Index<br/>Docker pwd · bounded file paths · no file content"]
+    L2["L2 Initial Skills<br/>two-stage router result · selected skill docs · before first action"]
+    L3["L3 Dynamic Working Memory<br/>action JSON · observation · inline small output · artifact placeholder · structured notes"]
+
+    L0 ~~~ L1
+    L1 ~~~ L2
+    L2 ~~~ L3
+
+    classDef layer fill:#f8fafc,stroke:#cbd5e1,color:#0f172a,stroke-width:1px
+    class L0,L1,L2,L3 layer
 ```
 
 层级说明：
