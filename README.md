@@ -188,27 +188,11 @@ flowchart TD
 L0-L3 分层架构：
 
 ```mermaid
-mindmap
-  root((MiniCode Context))
-    L0 Runtime Contract
-      System role
-      JSON action protocol
-      Tool list
-      Context policy
-    L1 Workspace File Index
-      Docker pwd
-      Bounded file paths
-      No file content
-    L2 Initial Skills
-      Two-stage router
-      Selected skill docs
-      Before first action
-    L3 Dynamic Working Memory
-      Action JSON
-      Observation
-      Inline small output
-      Artifact placeholder for large output
-      Structured notes after compaction
+flowchart LR
+    L0[L0 Runtime Contract<br/>system role<br/>JSON action protocol<br/>tool list<br/>context policy]
+    L1[L1 Workspace File Index<br/>Docker pwd<br/>bounded file paths<br/>no file content]
+    L2[L2 Initial Skills<br/>two-stage router result<br/>selected skill docs<br/>before first action]
+    L3[L3 Dynamic Working Memory<br/>action JSON<br/>observation<br/>inline small output<br/>artifact placeholder for large output<br/>structured notes after compaction]
 ```
 
 层级说明：
