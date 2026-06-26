@@ -124,13 +124,13 @@ MiniCode/
 - `minicode/observability.py`：结构化日志模型。记录每一步的模型输入摘要、action、tool 参数、权限决策、输出、修改文件、token 和耗时。
 - `minicode/eval.py`：内置 eval 任务集和指标汇总。用于衡量任务成功率、测试通过率、tool 调用次数、危险命令等。
 - `minicode/harness.py`：后续 harness 占位。未来用于自动判断项目类型、运行验证命令和驱动修复循环。
-- `minicode/memory.py`：文件型 memory store。默认读取 `.minicode/memory` 下的 Markdown/Text 记忆，支持搜索和按 id 加载。
+- `minicode/memory.py`：文件型 memory store。管理 `.minicode/memory` 下的 Markdown/Text 记忆，支持 active 记忆检索、draft 候选写入和索引更新。
 - `minicode/skills/schema.py`：定义 `Skill`、`SelectedSkill`、`SkillRoute` 等数据结构。
 - `minicode/skills/loader.py`：读取 `.skills/*.md`，解析 frontmatter 和正文。
 - `minicode/skills/catalog.py`：管理已加载的 skill，提供按名称查询和枚举能力。
 - `minicode/skills/router.py`：Skill 路由总控。先做元信息粗召回，再交给 DeepSeek 精排候选 skill。
 - `minicode/skills/prompt.py`：把选中的 skill 渲染成 prompt 文本，注入给模型。
-- `minicode/evolution.py`：后续自我进化占位。未来用于反思失败案例、沉淀策略和生成改进建议。
+- `minicode/evolution.py`：记忆沉淀触发器。当前实现“规则信号初筛 -> DeepSeek 精判提炼 -> draft/active 写入”，dreaming 演进后续再做。
 
 ## Skill 体系
 
@@ -216,8 +216,32 @@ flowchart TB
 - artifact 占位符不是单独的 context 类型，它是大 observation 被外置后留在 observation 里的引用。notes 也不是单独的 context 类型，它是旧 action / observation 被移出 prompt 后的摘要。
 - 大 observation 的原文会保存在 `.minicode/context-artifacts`，后续可通过 `read_context_artifact` 按行读回。
 - 小 observation 当前不会额外写 artifact；如果后续历史超限，它会从 prompt 原文中脱离，只在 notes 中保留摘要。
-- memory 默认来自 `.minicode/memory` 下的 `.md` / `.txt` 文件，目前只读检索，不自动写入。
+- memory 默认来自 `.minicode/memory` 下的 active `.md` / `.txt` 文件；任务结束后可自动沉淀 draft 候选，但 draft 默认不会进入检索复用。
 - run log 的 `context` 字段会记录 context layers、artifact、notes、compaction 事件。
+
+## 记忆沉淀
+
+当前只实现在线触发闭环，不做离线 dreaming 演进。一次 agent 任务结束后，MiniCode 会按配置执行：
+
+```mermaid
+flowchart TD
+    A[Run completed] --> B[Rule prefilter]
+    B -->|no signal| C[Skip memory write]
+    B -->|has signal| D[DeepSeek judge and distill]
+    D --> E{Useful durable memory?}
+    E -->|no| C
+    E -->|yes| F[Write draft or active memory]
+    F --> G[Update memory index]
+    G --> H[Record memory_evolution in run log]
+```
+
+三类记忆：
+
+- `project_memory`：项目事实、架构约定、文件组织、设计决策。
+- `procedural_memory`：可复用的修复流程、测试流程、工具使用经验。
+- `experience_memory`：明确表达过的协作经验和稳定工作偏好。
+
+默认模式是 `draft`：候选记忆会写入 `.minicode/memory/_drafts/`，但不会被 `search_memory` 检索到。`auto` 模式会直接写入 active 目录并参与后续检索，建议等提炼质量稳定后再用。
 
 ## 当前支持的 Tools
 
@@ -279,7 +303,7 @@ flowchart TB
 
 - `search_memory`
   - 参数：`query`、`limit`
-  - 作用：在 `.minicode/memory` 的 Markdown/Text 记忆中搜索相关项目经验。
+  - 作用：在 `.minicode/memory` 的 active Markdown/Text 记忆中搜索相关项目经验。
   - 执行位置：本地 memory store。
   - 使用方式：先搜索候选，再用 `load_memory` 加载完整记忆。
 
@@ -325,6 +349,9 @@ flowchart TB
 - `MINICODE_CONTEXT_KEEP_RECENT_MESSAGES`：历史脱离时保留最近消息数，默认 `6`
 - `MINICODE_CONTEXT_NOTE_CHAR_LIMIT`：结构化 notes 摘要最大字符数，默认 `6000`
 - `MINICODE_MEMORY_DIR`：本地 memory Markdown/Text 目录，默认 `.minicode/memory`
+- `MINICODE_MEMORY_TRIGGER`：记忆沉淀模式，`off` / `draft` / `auto`，默认 `draft`
+- `MINICODE_MEMORY_MIN_CONFIDENCE`：候选记忆最低置信度，默认 `0.7`
+- `MINICODE_MEMORY_MAX_CANDIDATES`：每次反思最多生成的候选记忆数，默认 `5`
 
 示例：
 

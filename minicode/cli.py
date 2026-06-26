@@ -148,6 +148,24 @@ def main(argv: list[str] | None = None) -> int:
         default=os.getenv("MINICODE_MEMORY_DIR", ".minicode/memory"),
         help="Directory containing project memory markdown/text files.",
     )
+    parser.add_argument(
+        "--memory-trigger",
+        choices=["off", "draft", "auto"],
+        default=os.getenv("MINICODE_MEMORY_TRIGGER", "draft"),
+        help="Memory sedimentation mode: off, draft candidates, or auto-active writes.",
+    )
+    parser.add_argument(
+        "--memory-min-confidence",
+        type=float,
+        default=float(os.getenv("MINICODE_MEMORY_MIN_CONFIDENCE", "0.7")),
+        help="Minimum LLM confidence required before writing a memory candidate.",
+    )
+    parser.add_argument(
+        "--memory-max-candidates",
+        type=int,
+        default=int(os.getenv("MINICODE_MEMORY_MAX_CANDIDATES", "5")),
+        help="Maximum memory candidates to request from one reflection pass.",
+    )
     args = parser.parse_args(argv)
 
     workspace = Path(args.workspace).resolve()
@@ -181,6 +199,9 @@ def main(argv: list[str] | None = None) -> int:
             context_keep_recent_messages=args.context_keep_recent_messages,
             context_note_char_limit=args.context_note_char_limit,
             memory_dir=args.memory_dir,
+            memory_trigger_mode=args.memory_trigger,
+            memory_min_confidence=args.memory_min_confidence,
+            memory_max_candidates=args.memory_max_candidates,
         )
         print(json.dumps(report.summary, indent=2, ensure_ascii=False))
         print(f"Eval report written to {args.eval_output}")
@@ -206,6 +227,9 @@ def main(argv: list[str] | None = None) -> int:
             context_keep_recent_messages=args.context_keep_recent_messages,
             context_note_char_limit=args.context_note_char_limit,
             memory_dir=args.memory_dir,
+            memory_trigger_mode=args.memory_trigger,
+            memory_min_confidence=args.memory_min_confidence,
+            memory_max_candidates=args.memory_max_candidates,
         ),
         skill_catalog=skill_catalog,
     )

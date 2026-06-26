@@ -71,6 +71,9 @@ def run_eval(
     context_keep_recent_messages: int = 6,
     context_note_char_limit: int = 6000,
     memory_dir: str = ".minicode/memory",
+    memory_trigger_mode: str = "draft",
+    memory_min_confidence: float = 0.7,
+    memory_max_candidates: int = 5,
 ) -> EvalReport:
     output_path = output_path.resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,6 +114,9 @@ def run_eval(
                 context_keep_recent_messages=context_keep_recent_messages,
                 context_note_char_limit=context_note_char_limit,
                 memory_dir=memory_dir,
+                memory_trigger_mode=memory_trigger_mode,
+                memory_min_confidence=memory_min_confidence,
+                memory_max_candidates=memory_max_candidates,
             ),
             skill_catalog=skill_catalog,
         )

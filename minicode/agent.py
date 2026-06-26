@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .context import ContextConfig, ContextManager, build_initial_context, render_context_layer_prompt
+from .evolution import SelfEvolution
 from .llm import LLMResponse
 from .memory import FileMemoryStore
 from .observability import FileSnapshot, RunLog, StepLog, TestResult, Timer, TokenUsage, summarize_messages
@@ -54,6 +55,9 @@ class AgentConfig:
     context_keep_recent_messages: int = 6
     context_note_char_limit: int = 6000
     memory_dir: str = ".minicode/memory"
+    memory_trigger_mode: str = "draft"
+    memory_min_confidence: float = 0.7
+    memory_max_candidates: int = 5
 
 
 @dataclass
@@ -174,8 +178,7 @@ class CodingAgent:
                 run_log.token_usage.add(llm_response.token_usage)
                 run_log.answer = answer
                 run_log.final_test_result = self._run_final_test()
-                run_log.context = context_manager.to_log_dict()
-                run_log.duration_ms = run_timer.elapsed_ms()
+                self._finalize_run_log(run_log, context_manager, run_timer)
                 return AgentResult(
                     answer=answer,
                     steps=step,
@@ -221,14 +224,28 @@ class CodingAgent:
         answer = f"Stopped after {self.config.max_steps} steps without finish."
         run_log.answer = answer
         run_log.final_test_result = self._run_final_test()
-        run_log.context = context_manager.to_log_dict()
-        run_log.duration_ms = run_timer.elapsed_ms()
+        self._finalize_run_log(run_log, context_manager, run_timer)
         return AgentResult(
             answer=answer,
             steps=self.config.max_steps,
             transcript=transcript,
             run_log=run_log,
         )
+
+    def _finalize_run_log(self, run_log: RunLog, context_manager: ContextManager, run_timer: Timer) -> None:
+        run_log.context = context_manager.to_log_dict()
+        run_log.duration_ms = run_timer.elapsed_ms()
+        memory_result = SelfEvolution(
+            llm=self.llm,
+            model=self.config.model,
+            memory_store=self.memory_store,
+            mode=self.config.memory_trigger_mode,
+            min_confidence=self.config.memory_min_confidence,
+            max_candidates=self.config.memory_max_candidates,
+        ).on_run_complete(run_log)
+        run_log.memory_evolution = memory_result.to_log_dict()
+        run_log.token_usage.add(memory_result.token_usage)
+        run_log.duration_ms = run_timer.elapsed_ms()
 
     def _run_final_test(self) -> TestResult | None:
         if not self.config.final_test_command:

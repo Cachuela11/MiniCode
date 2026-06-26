@@ -61,6 +61,7 @@ class RunLog:
     answer: str = ""
     skill_route: dict[str, Any] | None = None
     context: dict[str, Any] = field(default_factory=dict)
+    memory_evolution: dict[str, Any] | None = None
     steps: list[StepLog] = field(default_factory=list)
     token_usage: TokenUsage = field(default_factory=TokenUsage)
     final_test_result: TestResult | None = None
