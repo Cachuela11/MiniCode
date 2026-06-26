@@ -77,7 +77,7 @@ class ToolRegistry:
                 '- read_context_artifact: {"artifact_id": "obs-0001", "start_line": 1, "limit": 200}',
                 '- search_skills: {"query": "what you need help with", "limit": 5}',
                 '- load_skill: {"name": "skill_name", "max_chars": 4000}',
-                '- search_memory: {"query": "project fact or past lesson", "limit": 5}',
+                '- search_memory: {"query": "project fact, past lesson, or session detail", "limit": 5}',
                 '- load_memory: {"memory_id": "memory-id", "max_chars": 4000}',
                 '- finish: {"answer": "concise final answer for the user"} inside args, e.g. {"action":"finish","args":{"answer":"..."}}',
             ]
@@ -261,6 +261,8 @@ class ToolRegistry:
                         f"- memory_id: {item.memory_id}",
                         f"  score: {result.score}",
                         f"  reason: {result.reason}",
+                        f"  type: {item.memory_type}",
+                        f"  status: {item.status}",
                         f"  title: {item.title}",
                         f"  tags: {', '.join(item.tags) or 'none'}",
                         f"  preview: {preview}",
@@ -290,6 +292,8 @@ class ToolRegistry:
         output = "\n".join(
             [
                 f"Dynamic memory loaded: {item.memory_id}",
+                f"Type: {item.memory_type}",
+                f"Status: {item.status}",
                 f"Title: {item.title}",
                 f"Tags: {', '.join(item.tags) or 'none'}",
                 f"Source: {item.source_path}",

@@ -9,12 +9,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-MEMORY_TYPES = {"project_memory", "procedural_memory", "experience_memory"}
+MEMORY_TYPES = {"project_memory", "procedural_memory", "experience_memory", "session_memory"}
 MEMORY_STATUSES = {"draft", "active"}
 MEMORY_TYPE_FOLDERS = {
     "project_memory": "project",
     "procedural_memory": "procedural",
     "experience_memory": "experience",
+    "session_memory": "sessions",
 }
 FOLDER_MEMORY_TYPES = {folder: memory_type for memory_type, folder in MEMORY_TYPE_FOLDERS.items()}
 
@@ -99,6 +100,8 @@ class FileMemoryStore:
         folder = MEMORY_TYPE_FOLDERS[memory_type]
         now = datetime.now(timezone.utc).isoformat()
         memory_id = _candidate_id(candidate, now)
+        if memory_type == "session_memory":
+            status = "active"
         directory = self.memory_dir / ("_drafts" if status == "draft" else folder)
         if status == "draft":
             directory = directory / folder
@@ -157,7 +160,7 @@ class FileMemoryStore:
 
 
 class NullMemory:
-    def search(self, query: str, limit: int = 5) -> list[MemorySearchResult]:
+    def search(self, query: str, limit: int = 5, include_drafts: bool = False) -> list[MemorySearchResult]:
         return []
 
     def get(self, memory_id: str, include_drafts: bool = False) -> MemoryItem | None:
@@ -222,6 +225,10 @@ def _score_memory(query: str, item: MemoryItem) -> tuple[int, str]:
     if query_text in body_text:
         score += 2
         reasons.append("body_phrase")
+
+    if item.memory_type == "session_memory":
+        score = max(1, int(round(score * 0.6)))
+        reasons.append("type_weight:session_memory:0.6")
 
     return score, ", ".join(reasons[:8])
 
@@ -321,6 +328,7 @@ def _candidate_id(candidate: MemoryCandidate, timestamp: str) -> str:
         "project_memory": "proj",
         "procedural_memory": "proc",
         "experience_memory": "exp",
+        "session_memory": "sess",
     }[memory_type]
     digest_source = "|".join([candidate.title, candidate.body, candidate.source_run, timestamp])
     digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:10]

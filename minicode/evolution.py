@@ -5,7 +5,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
-from .memory import FileMemoryStore, MemoryCandidate, MemoryWriteResult
+from .memory import MEMORY_TYPES, FileMemoryStore, MemoryCandidate, MemoryWriteResult
 from .observability import RunLog, TokenUsage
 
 
@@ -69,9 +69,6 @@ class SelfEvolution:
             return MemoryEvolutionResult(mode=self.mode, status="off")
 
         signals = self.prefilter.collect(run_log)
-        if not signals:
-            return MemoryEvolutionResult(mode=self.mode, status="no_signal")
-
         result = MemoryEvolutionResult(mode=self.mode, status="no_candidates", signals=signals)
         try:
             candidates, token_usage, skipped = LlmMemoryJudge(
@@ -81,9 +78,10 @@ class SelfEvolution:
             ).judge(run_log=run_log, signals=signals)
             result.token_usage = token_usage
             result.skipped.extend(skipped)
-            write_status = "active" if self.mode == "auto" else "draft"
+            if not any(candidate.memory_type == "session_memory" for candidate in candidates):
+                candidates.append(_fallback_session_candidate(run_log))
             for candidate in candidates:
-                if candidate.confidence < self.min_confidence:
+                if candidate.memory_type != "session_memory" and candidate.confidence < self.min_confidence:
                     result.skipped.append(
                         {
                             "title": candidate.title,
@@ -93,7 +91,7 @@ class SelfEvolution:
                         }
                     )
                     continue
-                if _looks_duplicate(self.memory_store, candidate):
+                if candidate.memory_type != "session_memory" and _looks_duplicate(self.memory_store, candidate):
                     result.skipped.append(
                         {
                             "title": candidate.title,
@@ -103,11 +101,17 @@ class SelfEvolution:
                         }
                     )
                     continue
+                write_status = "active" if candidate.memory_type == "session_memory" or self.mode == "auto" else "draft"
                 result.written.append(self.memory_store.write_candidate(candidate, status=write_status))
             result.status = "written" if result.written else "no_candidates"
         except Exception as exc:  # Keep task completion independent from memory reflection.
-            result.status = "error"
             result.error = str(exc)
+            try:
+                result.written.append(self.memory_store.write_candidate(_fallback_session_candidate(run_log), status="active"))
+                result.status = "written_with_error"
+            except Exception as fallback_exc:
+                result.status = "error"
+                result.error = f"{exc}; fallback session write failed: {fallback_exc}"
         return result
 
 
@@ -153,6 +157,17 @@ class RuleMemoryPrefilter:
                 )
             )
 
+        signals.append(
+            MemorySignal(
+                memory_type="session_memory",
+                reason="completed run should be kept as a searchable session summary",
+                evidence=[
+                    f"task: {_preview(run_log.task, limit=160)}",
+                    f"answer: {_preview(run_log.answer, limit=160)}",
+                ],
+                priority=0,
+            )
+        )
         return sorted(signals, key=lambda item: (-item.priority, item.memory_type))
 
     def _project_evidence(self, text: str, modified_files: list[str]) -> list[str]:
@@ -293,13 +308,13 @@ class LlmMemoryJudge:
                 skipped.append({"reason": "candidate_not_object"})
                 continue
             sensitive = bool(raw.get("sensitive", False))
-            memory_type = str(raw.get("type") or raw.get("memory_type") or "").strip()
+            memory_type = str(raw.get("type") or raw.get("memory_type") or "").strip().lower()
             title = str(raw.get("title") or "").strip()
             body = str(raw.get("summary") or raw.get("body") or "").strip()
             if sensitive:
                 skipped.append({"title": title, "type": memory_type, "reason": "sensitive"})
                 continue
-            if memory_type not in {"project_memory", "procedural_memory", "experience_memory"}:
+            if memory_type not in MEMORY_TYPES:
                 skipped.append({"title": title, "type": memory_type, "reason": "invalid_memory_type"})
                 continue
             if not title or not body:
@@ -321,19 +336,23 @@ class LlmMemoryJudge:
 
 def _reflection_system_prompt(max_candidates: int) -> str:
     return (
-        "You judge whether a completed coding-agent run contains durable memory worth saving. "
+        "You judge whether a completed coding-agent run contains memory worth saving. "
         "Return one JSON object only. Schema: "
-        '{"candidates":[{"type":"project_memory|procedural_memory|experience_memory",'
+        '{"candidates":[{"type":"project_memory|procedural_memory|experience_memory|session_memory",'
         '"title":"short title","summary":"durable reusable memory","tags":["tag"],'
         '"confidence":0.0,"evidence":["short evidence"],"sensitive":false}]}. '
         f"Return at most {max_candidates} candidates. "
-        "Only save information that is likely reusable in future runs. "
+        "Always include exactly one session_memory candidate summarizing this run unless it would contain secrets. "
+        "Only save long-term memory candidates when the information is likely reusable in future runs. "
         "project_memory is for stable project facts, architecture, conventions, or decisions. "
         "procedural_memory is for reusable workflow/tool/process lessons. "
         "experience_memory is for explicit collaboration experience or stable user guidance; "
         "do not infer personality or preferences that were not clearly stated. "
-        "Do not save secrets, API keys, private credentials, raw logs, or one-off trivia. "
-        "Use concise summaries, not transcripts. If nothing is worth saving, return {\"candidates\":[]}."
+        "session_memory is a compact searchable episode summary of this completed run, including the task, outcome, "
+        "important files, tools, failures, and final test status when relevant. "
+        "Do not save secrets, API keys, private credentials, or raw logs. "
+        "Use concise summaries, not transcripts. For session_memory, omit trivial details while preserving the episode outcome. "
+        "If no long-term memory is worth saving, still return the session_memory."
     )
 
 
@@ -368,6 +387,40 @@ def _run_summary(run_log: RunLog) -> dict[str, Any]:
         "modified_files": _modified_files(run_log),
         "steps": steps,
     }
+
+
+def _fallback_session_candidate(run_log: RunLog) -> MemoryCandidate:
+    summary = _run_summary(run_log)
+    modified_files = summary["modified_files"]
+    tool_names = [step["tool"] for step in summary["steps"] if step["tool"] != "finish"]
+    final_test = summary["final_test"]
+    rows = [
+        f"Task: {summary['task']}",
+        f"Outcome: {summary['answer'] or 'No final answer recorded.'}",
+        f"Tools used: {', '.join(tool_names) if tool_names else 'none'}",
+        f"Modified files: {', '.join(modified_files) if modified_files else 'none'}",
+    ]
+    if final_test:
+        status = "passed" if final_test["passed"] else "failed"
+        rows.append(f"Final test: {status} ({final_test['command']}, exit_code={final_test['exit_code']})")
+    rows.append(f"Duration ms: {summary['duration_ms']}")
+    title = _session_title(run_log)
+    return MemoryCandidate(
+        memory_type="session_memory",
+        title=title,
+        body="\n".join(rows),
+        tags=["session", "run"],
+        confidence=1.0,
+        source_run=_source_run_id(run_log),
+        evidence=["local fallback session summary"],
+    )
+
+
+def _session_title(run_log: RunLog) -> str:
+    task = re.sub(r"\s+", " ", _redact(run_log.task)).strip()
+    if len(task) > 56:
+        task = task[:53] + "..."
+    return f"Session: {task or 'MiniCode run'}"
 
 
 def _modified_files(run_log: RunLog) -> list[str]:

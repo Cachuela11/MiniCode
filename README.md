@@ -219,29 +219,66 @@ flowchart TB
 - memory 默认来自 `.minicode/memory` 下的 active `.md` / `.txt` 文件；任务结束后可自动沉淀 draft 候选，但 draft 默认不会进入检索复用。
 - run log 的 `context` 字段会记录 context layers、artifact、notes、compaction 事件。
 
-## 记忆沉淀
+## 记忆触发闭环
 
-当前只实现在线触发闭环，不做离线 dreaming 演进。一次 agent 任务结束后，MiniCode 会按配置执行：
+当前实现的是在线记忆触发闭环，不包含离线 dreaming 演进。记忆沉淀发生在一次 agent run 结束之后，不在每个 step 后触发。
 
 ```mermaid
 flowchart TD
-    A[Run completed] --> B[Rule prefilter]
-    B -->|no signal| C[Skip memory write]
-    B -->|has signal| D[DeepSeek judge and distill]
-    D --> E{Useful durable memory?}
-    E -->|no| C
-    E -->|yes| F[Write draft or active memory]
-    F --> G[Update memory index]
-    G --> H[Record memory_evolution in run log]
+    A[Agent run finished] --> B[Collect rule signals]
+    B --> C[Add session_memory signal]
+    C --> D[DeepSeek judge and distill]
+    D --> E{Long-term candidates?}
+    E -->|yes| F[Write project/procedural/experience]
+    E -->|no| G[Skip long-term write]
+    D --> H[Write session_memory]
+    F --> I[Update index.json]
+    G --> I
+    H --> I
+    I --> J[Write run_log.memory_evolution]
 ```
 
-三类记忆：
+四类记忆：
 
 - `project_memory`：项目事实、架构约定、文件组织、设计决策。
 - `procedural_memory`：可复用的修复流程、测试流程、工具使用经验。
 - `experience_memory`：明确表达过的协作经验和稳定工作偏好。
+- `session_memory`：每次 run 的情景摘要，记录任务、结果、关键文件、工具使用和测试状态。
 
-默认模式是 `draft`：候选记忆会写入 `.minicode/memory/_drafts/`，但不会被 `search_memory` 检索到。`auto` 模式会直接写入 active 目录并参与后续检索，建议等提炼质量稳定后再用。
+当前执行逻辑：
+
+- run 结束后，`SelfEvolution` 先做规则初筛，只为前三类长期记忆收集信号。
+- 规则信号来自任务文本、最终答案、修改文件、tool 使用、测试结果、危险/无效命令等。
+- 系统每次都会额外追加一条 `session_memory` 信号，保证本次任务有可检索的情景摘要。
+- DeepSeek 负责判断和提炼候选记忆，返回结构化 JSON。
+- 如果 DeepSeek 没有返回 `session_memory`，MiniCode 会用本地 fallback 摘要补写一条。
+- 如果 DeepSeek 反思失败，MiniCode 也会尽量写入 fallback `session_memory`，不会让主任务失败。
+- 记忆写入结果会记录到 run log 的 `memory_evolution` 字段。
+
+存储结构：
+
+```text
+.minicode/memory/
+  _drafts/
+    project/
+    procedural/
+    experience/
+  project/
+  procedural/
+  experience/
+  sessions/
+  index.json
+```
+
+写入规则：
+
+- `draft` 模式是默认模式。`project_memory`、`procedural_memory`、`experience_memory` 会写入 `_drafts/`，默认不参与 `search_memory`。
+- `auto` 模式会把前三类长期记忆直接写入 active 目录，并参与后续检索。
+- `session_memory` 始终写入 active 的 `sessions/` 目录，并参与 `search_memory`。
+- `session_memory` 当前检索分数乘以 `0.6`，作为情景记忆降权，避免压过长期记忆。
+- `index.json` 是记忆目录和元数据索引，记录 `id`、`type`、`status`、`title`、`tags`、`path`。当前检索仍直接扫描 Markdown/Text 文件，`index.json` 主要服务人工查看、后续 context memory index 和 dreaming 批处理。
+
+后续 dreaming 记忆演进会基于 `sessions/` 和 `_drafts/` 做合并、去重、升级、降噪、淘汰，并把稳定经验提升为 active 长期记忆或 skill 候选。
 
 ## 当前支持的 Tools
 
@@ -303,7 +340,7 @@ flowchart TD
 
 - `search_memory`
   - 参数：`query`、`limit`
-  - 作用：在 `.minicode/memory` 的 active Markdown/Text 记忆中搜索相关项目经验。
+  - 作用：在 `.minicode/memory` 的 active 长期记忆和 `session_memory` 中搜索相关项目经验。
   - 执行位置：本地 memory store。
   - 使用方式：先搜索候选，再用 `load_memory` 加载完整记忆。
 
