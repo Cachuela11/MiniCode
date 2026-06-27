@@ -150,7 +150,7 @@ flowchart TD
     H --> J[Start agent loop]
 ```
 
-当前实现是两阶段路由：
+当前实现两阶段路由：
 
 - MiniCode 本地读取 `.skills/*.md`，解析 frontmatter 和正文。
 - 第一阶段 `MetadataSkillRetriever` 用任务文本匹配 `triggers`、`tags`、`intents`、skill 名称和 description，粗召回 topK。
