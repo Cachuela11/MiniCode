@@ -10,7 +10,6 @@ from pathlib import Path
 
 
 MEMORY_TYPES = {"project_memory", "procedural_memory", "experience_memory", "session_memory"}
-MEMORY_STATUSES = {"draft", "active"}
 MEMORY_TYPE_FOLDERS = {
     "project_memory": "project",
     "procedural_memory": "procedural",
@@ -28,7 +27,6 @@ class MemoryItem:
     tags: list[str]
     source_path: str
     memory_type: str = "project_memory"
-    status: str = "active"
 
 
 @dataclass(frozen=True)
@@ -52,7 +50,6 @@ class MemoryCandidate:
 @dataclass(frozen=True)
 class MemoryWriteResult:
     memory_id: str
-    status: str
     memory_type: str
     path: str
     index_path: str
@@ -63,24 +60,24 @@ class FileMemoryStore:
         self.workspace = workspace.resolve()
         self.memory_dir = self._resolve_memory_dir(memory_dir)
 
-    def search(self, query: str, limit: int = 5, include_drafts: bool = False) -> list[MemorySearchResult]:
+    def search(self, query: str, limit: int = 5) -> list[MemorySearchResult]:
         limit = max(1, min(limit, 20))
         results: list[MemorySearchResult] = []
-        for item in self.all(include_drafts=include_drafts):
+        for item in self.all():
             score, reason = _score_memory(query, item)
             if score > 0:
                 results.append(MemorySearchResult(item=item, score=score, reason=reason))
         results = sorted(results, key=lambda result: (-result.score, result.item.memory_id))
         return results[:limit]
 
-    def get(self, memory_id: str, include_drafts: bool = False) -> MemoryItem | None:
+    def get(self, memory_id: str) -> MemoryItem | None:
         normalized_id = _normalize_id(memory_id)
-        for item in self.all(include_drafts=include_drafts):
+        for item in self.all():
             if item.memory_id == normalized_id:
                 return item
         return None
 
-    def all(self, include_drafts: bool = False) -> list[MemoryItem]:
+    def all(self) -> list[MemoryItem]:
         if not self.memory_dir.exists():
             return []
 
@@ -89,29 +86,21 @@ class FileMemoryStore:
             if path.suffix.lower() not in {".md", ".txt"} or not path.is_file():
                 continue
             item = _load_memory_item(path, self.memory_dir)
-            if item.status == "draft" and not include_drafts:
-                continue
             items.append(item)
         return items
 
-    def write_candidate(self, candidate: MemoryCandidate, status: str = "draft") -> MemoryWriteResult:
-        status = _normalize_status(status)
+    def write_candidate(self, candidate: MemoryCandidate) -> MemoryWriteResult:
         memory_type = _normalize_memory_type(candidate.memory_type)
         folder = MEMORY_TYPE_FOLDERS[memory_type]
         now = datetime.now(timezone.utc).isoformat()
         memory_id = _candidate_id(candidate, now)
-        if memory_type == "session_memory":
-            status = "active"
-        directory = self.memory_dir / ("_drafts" if status == "draft" else folder)
-        if status == "draft":
-            directory = directory / folder
+        directory = self.memory_dir / folder
         directory.mkdir(parents=True, exist_ok=True)
         path = _avoid_overwrite(directory / f"{_slugify(candidate.title)}.md")
 
         frontmatter = {
             "id": memory_id,
             "type": memory_type,
-            "status": status,
             "title": candidate.title.strip() or memory_id,
             "tags": [_slugify(tag, limit=32) for tag in candidate.tags if str(tag).strip()],
             "confidence": f"{_clamp_confidence(candidate.confidence):.2f}",
@@ -124,7 +113,6 @@ class FileMemoryStore:
         index_path = self.update_index()
         return MemoryWriteResult(
             memory_id=memory_id,
-            status=status,
             memory_type=memory_type,
             path=str(path),
             index_path=str(index_path),
@@ -133,7 +121,7 @@ class FileMemoryStore:
     def update_index(self) -> Path:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         path = self.memory_dir / "index.json"
-        items = self.all(include_drafts=True)
+        items = self.all()
         payload = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "memory_count": len(items),
@@ -141,7 +129,6 @@ class FileMemoryStore:
                 {
                     "id": item.memory_id,
                     "type": item.memory_type,
-                    "status": item.status,
                     "title": item.title,
                     "tags": item.tags,
                     "path": _relative_or_absolute(Path(item.source_path), self.workspace),
@@ -160,13 +147,13 @@ class FileMemoryStore:
 
 
 class NullMemory:
-    def search(self, query: str, limit: int = 5, include_drafts: bool = False) -> list[MemorySearchResult]:
+    def search(self, query: str, limit: int = 5) -> list[MemorySearchResult]:
         return []
 
-    def get(self, memory_id: str, include_drafts: bool = False) -> MemoryItem | None:
+    def get(self, memory_id: str) -> MemoryItem | None:
         return None
 
-    def all(self, include_drafts: bool = False) -> list[MemoryItem]:
+    def all(self) -> list[MemoryItem]:
         return []
 
     def recall(self, task: str) -> str:
@@ -182,7 +169,6 @@ def _load_memory_item(path: Path, root: Path) -> MemoryItem:
     rel = path.relative_to(root).with_suffix("").as_posix()
     memory_id = _normalize_id(str(metadata.get("id") or rel))
     memory_type = _normalize_memory_type(str(metadata.get("type") or _infer_type_from_path(path, root)))
-    status = _normalize_status(str(metadata.get("status") or _infer_status_from_path(path, root)))
     title = str(metadata.get("title") or _first_heading(body) or path.stem)
     tags = _as_list(metadata.get("tags"))
     return MemoryItem(
@@ -192,7 +178,6 @@ def _load_memory_item(path: Path, root: Path) -> MemoryItem:
         tags=tags,
         source_path=str(path),
         memory_type=memory_type,
-        status=status,
     )
 
 
@@ -303,23 +288,12 @@ def _normalize_memory_type(value: str) -> str:
     return "project_memory"
 
 
-def _normalize_status(value: str) -> str:
-    normalized = value.strip().lower()
-    if normalized in MEMORY_STATUSES:
-        return normalized
-    return "draft"
-
-
 def _infer_type_from_path(path: Path, root: Path) -> str:
     parts = path.relative_to(root).parts
     for part in parts:
         if part in FOLDER_MEMORY_TYPES:
             return FOLDER_MEMORY_TYPES[part]
     return "project_memory"
-
-
-def _infer_status_from_path(path: Path, root: Path) -> str:
-    return "draft" if "_drafts" in path.relative_to(root).parts else "active"
 
 
 def _candidate_id(candidate: MemoryCandidate, timestamp: str) -> str:

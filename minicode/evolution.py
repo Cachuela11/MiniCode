@@ -9,7 +9,7 @@ from .memory import FileMemoryStore, MemoryCandidate, MemoryWriteResult
 from .observability import RunLog, TokenUsage
 
 
-MEMORY_TRIGGER_MODES = {"off", "draft", "auto"}
+MEMORY_TRIGGER_MODES = {"off", "on"}
 LONG_TERM_MEMORY_TYPES = {"project_memory", "procedural_memory", "experience_memory"}
 
 
@@ -53,7 +53,7 @@ class SelfEvolution:
         llm: ChatClient,
         model: str,
         memory_store: FileMemoryStore,
-        mode: str = "draft",
+        mode: str = "on",
         min_confidence: float = 0.7,
         max_candidates: int = 5,
     ):
@@ -72,7 +72,7 @@ class SelfEvolution:
         result = MemoryEvolutionResult(mode=self.mode, status="started")
         session_candidate = _session_candidate(run_log)
         try:
-            result.written.append(self.memory_store.write_candidate(session_candidate, status="active"))
+            result.written.append(self.memory_store.write_candidate(session_candidate))
         except Exception as exc:
             result.status = "error"
             result.error = f"session memory write failed: {exc}"
@@ -114,8 +114,7 @@ class SelfEvolution:
                         }
                     )
                     continue
-                write_status = "active" if self.mode == "auto" else "draft"
-                result.written.append(self.memory_store.write_candidate(candidate, status=write_status))
+                result.written.append(self.memory_store.write_candidate(candidate))
 
             long_term_written = any(item.memory_type in LONG_TERM_MEMORY_TYPES for item in result.written)
             result.status = "long_term_written" if long_term_written else "session_written_no_long_term"
@@ -425,7 +424,7 @@ def _redact_tool_args(args: dict[str, Any]) -> dict[str, Any]:
 
 def _looks_duplicate(memory_store: FileMemoryStore, candidate: MemoryCandidate) -> bool:
     query = " ".join([candidate.title, candidate.body, *candidate.tags])
-    for result in memory_store.search(query, limit=3, include_drafts=True):
+    for result in memory_store.search(query, limit=3):
         if result.item.memory_type == candidate.memory_type and result.score >= 12:
             return True
     return False
@@ -467,7 +466,7 @@ def _normalize_mode(mode: str) -> str:
     normalized = mode.strip().lower()
     if normalized in MEMORY_TRIGGER_MODES:
         return normalized
-    return "draft"
+    return "on"
 
 
 def _as_string_list(value: Any) -> list[str]:

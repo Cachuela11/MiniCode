@@ -262,7 +262,6 @@ class ToolRegistry:
                         f"  score: {result.score}",
                         f"  reason: {result.reason}",
                         f"  type: {item.memory_type}",
-                        f"  status: {item.status}",
                         f"  title: {item.title}",
                         f"  tags: {', '.join(item.tags) or 'none'}",
                         f"  preview: {preview}",
@@ -293,7 +292,6 @@ class ToolRegistry:
             [
                 f"Dynamic memory loaded: {item.memory_id}",
                 f"Type: {item.memory_type}",
-                f"Status: {item.status}",
                 f"Title: {item.title}",
                 f"Tags: {', '.join(item.tags) or 'none'}",
                 f"Source: {item.source_path}",

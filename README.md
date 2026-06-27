@@ -124,13 +124,13 @@ MiniCode/
 - `minicode/observability.py`：结构化日志模型。记录每一步的模型输入摘要、action、tool 参数、权限决策、输出、修改文件、token 和耗时。
 - `minicode/eval.py`：内置 eval 任务集和指标汇总。用于衡量任务成功率、测试通过率、tool 调用次数、危险命令等。
 - `minicode/harness.py`：后续 harness 占位。未来用于自动判断项目类型、运行验证命令和驱动修复循环。
-- `minicode/memory.py`：文件型 memory store。管理 `.minicode/memory` 下的 Markdown/Text 记忆，支持 active 记忆检索、draft 候选写入和索引更新。
+- `minicode/memory.py`：文件型 memory store。管理 `.minicode/memory` 下的 Markdown/Text 记忆，支持检索、写入和索引更新。
 - `minicode/skills/schema.py`：定义 `Skill`、`SelectedSkill`、`SkillRoute` 等数据结构。
 - `minicode/skills/loader.py`：读取 `.skills/*.md`，解析 frontmatter 和正文。
 - `minicode/skills/catalog.py`：管理已加载的 skill，提供按名称查询和枚举能力。
 - `minicode/skills/router.py`：Skill 路由总控。先做元信息粗召回，再交给 DeepSeek 精排候选 skill。
 - `minicode/skills/prompt.py`：把选中的 skill 渲染成 prompt 文本，注入给模型。
-- `minicode/evolution.py`：记忆沉淀触发器。当前实现“规则信号初筛 -> DeepSeek 精判提炼 -> draft/active 写入”，dreaming 演进后续再做。
+- `minicode/evolution.py`：记忆沉淀触发器。当前实现“session 摘要 -> 规则信号初筛 -> DeepSeek 长期记忆分类 -> 写入 memory”，dreaming 演进后续再做。
 
 ## Skill 体系
 
@@ -216,7 +216,7 @@ flowchart TB
 - artifact 占位符不是单独的 context 类型，它是大 observation 被外置后留在 observation 里的引用。notes 也不是单独的 context 类型，它是旧 action / observation 被移出 prompt 后的摘要。
 - 大 observation 的原文会保存在 `.minicode/context-artifacts`，后续可通过 `read_context_artifact` 按行读回。
 - 小 observation 当前不会额外写 artifact；如果后续历史超限，它会从 prompt 原文中脱离，只在 notes 中保留摘要。
-- memory 默认来自 `.minicode/memory` 下的 active `.md` / `.txt` 文件；任务结束后可自动沉淀 draft 候选，但 draft 默认不会进入检索复用。
+- memory 默认来自 `.minicode/memory` 下的 `.md` / `.txt` 文件；任务结束后会自动沉淀 `session_memory`，命中规则后再沉淀长期记忆。
 - run log 的 `context` 字段会记录 context layers、artifact、notes、compaction 事件。
 
 ## 记忆触发闭环
@@ -226,13 +226,13 @@ flowchart TB
 ```mermaid
 flowchart TD
     A[Agent run finished] --> B[Build session summary]
-    B --> C[Write active session_memory]
+    B --> C[Write session_memory]
     C --> D[Regex prefilter on session summary]
     D --> E{Hit long-term signals?}
     E -->|no| F[Stop after session memory]
     E -->|yes| G[DeepSeek classify into<br/>project/procedural/experience]
     G --> H{Long-term candidates?}
-    H -->|yes| I[Write draft or active long-term memory]
+    H -->|yes| I[Write long-term memory]
     H -->|no| J[Skip long-term write]
     F --> K[Update index.json]
     I --> K
@@ -263,10 +263,6 @@ flowchart TD
 
 ```text
 .minicode/memory/
-  _drafts/
-    project/
-    procedural/
-    experience/
   project/
   procedural/
   experience/
@@ -276,11 +272,12 @@ flowchart TD
 
 写入规则：
 
-- `draft` 模式是默认模式。`project_memory`、`procedural_memory`、`experience_memory` 会写入 `_drafts/`，默认不参与 `search_memory`。
-- `auto` 模式会把前三类长期记忆直接写入 active 目录，并参与后续检索。
-- `session_memory` 始终写入 active 的 `sessions/` 目录，并参与 `search_memory`。
+- `MINICODE_MEMORY_TRIGGER=on` 是默认模式，会写入 `session_memory`，命中规则后写入长期记忆。
+- `MINICODE_MEMORY_TRIGGER=off` 会关闭记忆沉淀。
+- 四类记忆都直接写入对应目录，并参与 `search_memory`。
+- `session_memory` 始终写入 `sessions/` 目录，并参与 `search_memory`。
 - `session_memory` 当前检索分数乘以 `0.6`，作为情景记忆降权，避免压过长期记忆。
-- `index.json` 是记忆目录和元数据索引，记录 `id`、`type`、`status`、`title`、`tags`、`path`。当前检索仍直接扫描 Markdown/Text 文件，`index.json` 主要服务人工查看、后续 context memory index 和 dreaming 批处理。
+- `index.json` 是记忆目录和元数据索引，记录 `id`、`type`、`title`、`tags`、`path`。当前检索仍直接扫描 Markdown/Text 文件，`index.json` 主要服务人工查看、后续 context memory index 和 dreaming 批处理。
 
 后续 dreaming 记忆演进会区分四类记忆处理：`session_memory` 负责批量复盘和升级，`project_memory` 负责项目事实合并与冲突消解，`procedural_memory` 负责流程抽象和 skill 候选生成，`experience_memory` 负责稳定协作经验的合并、去重和更新。
 
@@ -344,7 +341,7 @@ flowchart TD
 
 - `search_memory`
   - 参数：`query`、`limit`
-  - 作用：在 `.minicode/memory` 的 active 长期记忆和 `session_memory` 中搜索相关项目经验。
+  - 作用：在 `.minicode/memory` 的长期记忆和 `session_memory` 中搜索相关项目经验。
   - 执行位置：本地 memory store。
   - 使用方式：先搜索候选，再用 `load_memory` 加载完整记忆。
 
@@ -390,7 +387,7 @@ flowchart TD
 - `MINICODE_CONTEXT_KEEP_RECENT_MESSAGES`：历史脱离时保留最近消息数，默认 `6`
 - `MINICODE_CONTEXT_NOTE_CHAR_LIMIT`：结构化 notes 摘要最大字符数，默认 `6000`
 - `MINICODE_MEMORY_DIR`：本地 memory Markdown/Text 目录，默认 `.minicode/memory`
-- `MINICODE_MEMORY_TRIGGER`：记忆沉淀模式，`off` / `draft` / `auto`，默认 `draft`
+- `MINICODE_MEMORY_TRIGGER`：记忆沉淀模式，`off` / `on`，默认 `on`
 - `MINICODE_MEMORY_MIN_CONFIDENCE`：候选记忆最低置信度，默认 `0.7`
 - `MINICODE_MEMORY_MAX_CANDIDATES`：每次反思最多生成的候选记忆数，默认 `5`
 

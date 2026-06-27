@@ -55,7 +55,7 @@ class AgentConfig:
     context_keep_recent_messages: int = 6
     context_note_char_limit: int = 6000
     memory_dir: str = ".minicode/memory"
-    memory_trigger_mode: str = "draft"
+    memory_trigger_mode: str = "on"
     memory_min_confidence: float = 0.7
     memory_max_candidates: int = 5
 

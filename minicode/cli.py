@@ -150,9 +150,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--memory-trigger",
-        choices=["off", "draft", "auto"],
-        default=os.getenv("MINICODE_MEMORY_TRIGGER", "draft"),
-        help="Memory sedimentation mode: off, draft candidates, or auto-active writes.",
+        choices=["off", "on"],
+        default=os.getenv("MINICODE_MEMORY_TRIGGER", "on"),
+        help="Memory sedimentation mode: off or on.",
     )
     parser.add_argument(
         "--memory-min-confidence",
