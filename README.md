@@ -225,17 +225,19 @@ flowchart TB
 
 ```mermaid
 flowchart TD
-    A[Agent run finished] --> B[Collect rule signals]
-    B --> C[Add session_memory signal]
-    C --> D[DeepSeek judge and distill]
-    D --> E{Long-term candidates?}
-    E -->|yes| F[Write project/procedural/experience]
-    E -->|no| G[Skip long-term write]
-    D --> H[Write session_memory]
-    F --> I[Update index.json]
-    G --> I
-    H --> I
-    I --> J[Write run_log.memory_evolution]
+    A[Agent run finished] --> B[Build session summary]
+    B --> C[Write active session_memory]
+    C --> D[Regex prefilter on session summary]
+    D --> E{Hit long-term signals?}
+    E -->|no| F[Stop after session memory]
+    E -->|yes| G[DeepSeek classify into<br/>project/procedural/experience]
+    G --> H{Long-term candidates?}
+    H -->|yes| I[Write draft or active long-term memory]
+    H -->|no| J[Skip long-term write]
+    F --> K[Update index.json]
+    I --> K
+    J --> K
+    K --> L[Write run_log.memory_evolution]
 ```
 
 四类记忆：
@@ -247,12 +249,14 @@ flowchart TD
 
 当前执行逻辑：
 
-- run 结束后，`SelfEvolution` 先做规则初筛，只为前三类长期记忆收集信号。
-- 规则信号来自任务文本、最终答案、修改文件、tool 使用、测试结果、危险/无效命令等。
-- 系统每次都会额外追加一条 `session_memory` 信号，保证本次任务有可检索的情景摘要。
-- DeepSeek 负责判断和提炼候选记忆，返回结构化 JSON。
-- 如果 DeepSeek 没有返回 `session_memory`，MiniCode 会用本地 fallback 摘要补写一条。
-- 如果 DeepSeek 反思失败，MiniCode 也会尽量写入 fallback `session_memory`，不会让主任务失败。
+- run 结束后，`SelfEvolution` 先生成一条本地 `session_memory` 摘要。
+- `session_memory` 会先写入 `.minicode/memory/sessions/`，保证每次 run 都有可检索的情景记录。
+- 然后 MiniCode 只对这条 session 摘要做正则初筛，判断是否出现长期沉淀信号。
+- 规则信号来自 session 摘要里的任务、最终答案、修改文件、tool 使用、测试结果、危险/无效命令等。
+- 如果没有命中长期信号，本次记忆沉淀到 session memory 为止，不调用 DeepSeek 做长期分类。
+- 如果命中长期信号，DeepSeek 只负责把 session 摘要精判并分类为 `project_memory`、`procedural_memory`、`experience_memory` 三类候选。
+- DeepSeek 不再负责生成 `session_memory`，`session_memory` 始终由本地摘要生成。
+- 如果 DeepSeek 长期分类失败，已经写入的 `session_memory` 会保留，不会让主任务失败。
 - 记忆写入结果会记录到 run log 的 `memory_evolution` 字段。
 
 存储结构：
@@ -278,7 +282,7 @@ flowchart TD
 - `session_memory` 当前检索分数乘以 `0.6`，作为情景记忆降权，避免压过长期记忆。
 - `index.json` 是记忆目录和元数据索引，记录 `id`、`type`、`status`、`title`、`tags`、`path`。当前检索仍直接扫描 Markdown/Text 文件，`index.json` 主要服务人工查看、后续 context memory index 和 dreaming 批处理。
 
-后续 dreaming 记忆演进会基于 `sessions/` 和 `_drafts/` 做合并、去重、升级、降噪、淘汰，并把稳定经验提升为 active 长期记忆或 skill 候选。
+后续 dreaming 记忆演进会区分四类记忆处理：`session_memory` 负责批量复盘和升级，`project_memory` 负责项目事实合并与冲突消解，`procedural_memory` 负责流程抽象和 skill 候选生成，`experience_memory` 负责稳定协作经验的合并、去重和更新。
 
 ## 当前支持的 Tools
 
