@@ -100,6 +100,12 @@ MiniCode/
     harness.py
     memory.py
     dreaming.py
+    retrieval/
+      __init__.py
+      schema.py
+      ranking.py
+      skill.py
+      memory.py
     skills/
       __init__.py
       schema.py
@@ -122,11 +128,12 @@ MiniCode/
 - `minicode/sandbox.py`：Docker sandbox。负责把命令放进 Docker 的 `/workspace` 中执行，并收集 stdout、stderr、exit code、耗时和权限信息。
 - `minicode/permissions.py`：命令权限策略。对危险命令做 `allow`、`ask`、`deny` 判断，并支持 `never`、`ask`、`always` 三种审批模式。
 - `minicode/context.py`：多层上下文构建与压缩。负责 L0-L3 层说明、初始文件索引、大 observation 外置、占位预览、结构化 notes 和历史超限压缩。
-- `minicode/observability.py`：结构化日志模型。记录每一步的模型输入摘要、action、tool 参数、权限决策、输出、修改文件、token 和耗时。
+- `minicode/observability.py`：结构化日志模型。记录每一步的模型输入摘要、action、tool 参数、权限决策、输出、修改文件、token、耗时和 retrieval trace。
 - `minicode/eval.py`：内置 eval 任务集和指标汇总。用于衡量任务成功率、测试通过率、tool 调用次数、危险命令等。
 - `minicode/harness.py`：后续 harness 占位。未来用于自动判断项目类型、运行验证命令和驱动修复循环。
 - `minicode/memory.py`：文件型 memory store。管理 `.minicode/memory` 下的 Markdown/Text 记忆，支持检索、写入、归档和索引更新。
 - `minicode/dreaming.py`：离线 memory dreaming。负责判断触发条件、精确去重、调用 DeepSeek 合并摘要，并把旧长期记忆归档。
+- `minicode/retrieval/`：统一检索基础层。提供 `RetrievalCandidate`、`RetrievalResult`、`RetrievalTrace` 等共享结构；`search_skills` 和 `search_memory` 的 action 仍然分开，但 run log 使用统一 trace 记录检索过程。
 - `minicode/skills/schema.py`：定义 `Skill`、`SelectedSkill`、`SkillRoute` 等数据结构。
 - `minicode/skills/loader.py`：读取 `.skills/*.md`，解析 frontmatter 和正文。
 - `minicode/skills/catalog.py`：管理已加载的 skill，提供按名称查询和枚举能力。
@@ -162,6 +169,21 @@ flowchart TD
 - 默认粗召回 `8` 个候选，可用 `--skill-recall-k` 调整。
 - 没有命中 skill 时，仍然会注入完整 tool 列表，模型依然能调用 tools。
 - run log 会记录 `skill_route.recalled`、`skill_route.selected`、`reranker` 和精排 token 用量，方便后续 eval 对比 skill 是否有效。
+
+**统一 Retriever**
+
+当前没有合并模型可见的检索 action，模型仍然分别调用 `search_skills` 和 `search_memory`。底层新增 `minicode/retrieval/` 作为共享检索基础层，统一候选、结果、阶段和 trace 的数据结构。
+
+```text
+search_skills -> SkillToolRetriever  -> RetrievalTrace(kind=skill)
+search_memory -> MemoryToolRetriever -> RetrievalTrace(kind=memory)
+```
+
+- `schema.py`：定义 `RetrievalCandidate`、`RetrievalResult`、`RetrievalStage`、`RetrievalTrace`。
+- `skill.py`：包装现有 skill 元信息召回，不做 memory 降权。
+- `memory.py`：包装现有 memory 检索，后续动态权重、衰减、usage feedback 和 diversity rerank 会在这里实现。
+- `ranking.py`：放通用文本规范化和 reason 处理。
+- 每次 `search_skills` / `search_memory` 的结果都会写入 step log 的 `retrieval_trace`，方便后续 eval 对比检索质量。
 
 ## 多层 Context
 

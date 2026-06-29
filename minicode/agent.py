@@ -235,6 +235,7 @@ class CodingAgent:
                     dangerous_command=tool_result.dangerous_command,
                     invalid_command=tool_result.invalid_command,
                     context_event=context_event.to_log_dict(),
+                    retrieval_trace=tool_result.retrieval_trace,
                 )
             )
             run_log.token_usage.add(llm_response.token_usage)

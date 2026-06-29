@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .memory import FileMemoryStore, NullMemory
+from .retrieval.memory import MemoryToolRetriever
+from .retrieval.skill import SkillToolRetriever
 from .sandbox import DockerSandbox, SandboxResult
-from .skills import MetadataSkillRetriever, SkillCatalog
+from .skills import SkillCatalog
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,7 @@ class ToolResult:
     dangerous_command: bool = False
     invalid_command: bool = False
     duration_ms: int = 0
+    retrieval_trace: dict[str, Any] | None = None
 
 
 ToolHandler = Callable[[dict[str, Any]], ToolResult]
@@ -187,10 +190,17 @@ class ToolRegistry:
         if not query:
             message = "ERROR: search_skills requires args.query."
             return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
-        recalled = MetadataSkillRetriever(self.skill_catalog, top_k=limit).retrieve(query)
+        retrieval = SkillToolRetriever(self.skill_catalog).retrieve(query, limit=limit)
+        recalled = retrieval.recalled
         if not recalled:
             output = "No matching skills found."
-            return ToolResult(True, output, stdout=output, exit_code=0)
+            return ToolResult(
+                True,
+                output,
+                stdout=output,
+                exit_code=0,
+                retrieval_trace=retrieval.trace.to_log_dict(),
+            )
         rows = ["Matching skills:"]
         for item in recalled:
             skill = item.skill
@@ -208,7 +218,13 @@ class ToolRegistry:
             )
         rows.append("Use load_skill with the selected name to inject the full skill workflow.")
         output = "\n".join(rows)
-        return ToolResult(True, output, stdout=output, exit_code=0)
+        return ToolResult(
+            True,
+            output,
+            stdout=output,
+            exit_code=0,
+            retrieval_trace=retrieval.trace.to_log_dict(),
+        )
 
     def _load_skill(self, args: dict[str, Any]) -> ToolResult:
         name = str(args.get("name", "")).strip()
@@ -247,10 +263,17 @@ class ToolRegistry:
         if not query:
             message = "ERROR: search_memory requires args.query."
             return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
-        results = self.memory_store.search(query, limit=limit)
+        retrieval = MemoryToolRetriever(self.memory_store).retrieve(query, limit=limit)
+        results = retrieval.results
         if not results:
             output = "No matching memories found."
-            return ToolResult(True, output, stdout=output, exit_code=0)
+            return ToolResult(
+                True,
+                output,
+                stdout=output,
+                exit_code=0,
+                retrieval_trace=retrieval.trace.to_log_dict(),
+            )
         rows = ["Matching memories:"]
         for result in results:
             item = result.item
@@ -270,7 +293,13 @@ class ToolRegistry:
             )
         rows.append("Use load_memory with the selected memory_id to inject the full memory.")
         output = "\n".join(rows)
-        return ToolResult(True, output, stdout=output, exit_code=0)
+        return ToolResult(
+            True,
+            output,
+            stdout=output,
+            exit_code=0,
+            retrieval_trace=retrieval.trace.to_log_dict(),
+        )
 
     def _load_memory(self, args: dict[str, Any]) -> ToolResult:
         memory_id = str(args.get("memory_id", "")).strip()

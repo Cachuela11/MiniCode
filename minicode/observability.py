@@ -41,6 +41,7 @@ class StepLog:
     dangerous_command: bool = False
     invalid_command: bool = False
     context_event: dict[str, Any] | None = None
+    retrieval_trace: dict[str, Any] | None = None
 
 
 @dataclass
