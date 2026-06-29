@@ -293,10 +293,12 @@ flowchart TD
 第一版 dreaming：
 
 - 触发方式：手动 `python -m minicode --dream` 强制执行；自动模式下在 run 结束后检查阈值。
-- 自动触发规则：发现可处理范围内的精确重复 memory；超过热窗口的原始 `session_memory` 数量达到 `MINICODE_DREAM_SESSION_THRESHOLD`；超过热窗口的原始 `session_memory` 估算 token 量达到 `MINICODE_DREAM_SESSION_TOKEN_THRESHOLD`；新增 active memory 数量达到 `MINICODE_DREAM_MEMORY_THRESHOLD`；已有上次 dreaming 记录且超过 `MINICODE_DREAM_INTERVAL_HOURS`，同时存在超过热窗口的原始 session。
+- 自动触发规则按层计算，四层分别是 `session_memory -> project_memory -> procedural_memory -> experience_memory`。每层都支持精确重复、数量阈值、估算 token 阈值、时间间隔四类触发。
+- `session_memory` 层只处理超过热窗口的原始 session，数量阈值使用 `MINICODE_DREAM_SESSION_THRESHOLD`，token 阈值使用 `MINICODE_DREAM_SESSION_TOKEN_THRESHOLD`。
+- `project_memory`、`procedural_memory`、`experience_memory` 层使用 `MINICODE_DREAM_MEMORY_THRESHOLD` 和 `MINICODE_DREAM_MEMORY_TOKEN_THRESHOLD`。
 - 热窗口规则：默认近 `2` 天的原始 `session_memory` 不参与 dreaming、不去重、不归档，继续完整参与检索。
-- 处理内容：先本地归档可处理范围内的精确重复 memory；再把超过热窗口的原始 session 和部分长期记忆交给 DeepSeek 做合并、摘要和长期记忆候选生成。
-- 写入策略：dreaming 可以写入两类候选：`session_memory/subtype=session_summary` 作为 session 层压缩摘要；`project_memory`、`procedural_memory`、`experience_memory` 作为单独判断后的长期记忆。
+- 处理内容：先本地归档可处理范围内的精确重复 memory；再按层把命中的 batch 交给 DeepSeek 做本层合并、摘要，并判断是否需要向上一层写入本次 dreaming 结果。
+- 写入策略：`session_memory` 层可以写入 `subtype=session_summary`，并可判断是否上升为 `project_memory`；`project_memory` 可上升为 `procedural_memory`；`procedural_memory` 可上升为 `experience_memory`；`experience_memory` 是当前最高层，只做本层合并。
 - 归档策略：原始旧 session 只有在对应 `session_summary` 成功写入后才归档；被 LLM 合并且完全被新长期记忆替代的旧长期 memory 也会归档。普通检索和 `index.json` 不读取 `_archive/`。
 - 状态文件：`dreaming-state.json` 记录上次 dreaming 时间、已处理 session id 和已处理 memory id。
 
@@ -412,8 +414,9 @@ flowchart TD
 - `MINICODE_DREAMING`：run 结束后的 dreaming 模式，`off` / `auto`，默认 `auto`
 - `MINICODE_DREAM_SESSION_THRESHOLD`：新增多少条 `session_memory` 后自动触发 dreaming，默认 `8`
 - `MINICODE_DREAM_SESSION_TOKEN_THRESHOLD`：超过热窗口的原始 session memory 估算 token 总量达到多少后触发，默认 `12000`
-- `MINICODE_DREAM_MEMORY_THRESHOLD`：新增多少条 active memory 后自动触发 dreaming，默认 `40`
-- `MINICODE_DREAM_INTERVAL_HOURS`：距离上次 dreaming 超过多少小时且存在新 session 时触发，默认 `24`
+- `MINICODE_DREAM_MEMORY_THRESHOLD`：单个长期 memory 层新增多少条 active memory 后自动触发 dreaming，默认 `40`
+- `MINICODE_DREAM_MEMORY_TOKEN_THRESHOLD`：单个长期 memory 层估算 token 总量达到多少后触发，默认 `12000`
+- `MINICODE_DREAM_INTERVAL_HOURS`：距离上次 dreaming 超过多少小时且某层存在 eligible memory 时触发，默认 `24`
 - `MINICODE_DREAM_MAX_BATCH_SIZE`：单次 dreaming 最多处理多少条 memory，默认 `20`
 - `MINICODE_DREAM_MIN_CONFIDENCE`：dreaming 写入长期记忆的最低置信度，默认 `0.75`
 - `MINICODE_DREAM_SESSION_HOT_DAYS`：原始 session memory 保持完整 active 的天数，默认 `2`
