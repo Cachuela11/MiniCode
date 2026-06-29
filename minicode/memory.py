@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import json
 import hashlib
+import shutil
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ from pathlib import Path
 
 
 MEMORY_TYPES = {"project_memory", "procedural_memory", "experience_memory", "session_memory"}
+MEMORY_ARCHIVE_DIR = "_archive"
 MEMORY_TYPE_FOLDERS = {
     "project_memory": "project",
     "procedural_memory": "procedural",
@@ -27,6 +29,7 @@ class MemoryItem:
     tags: list[str]
     source_path: str
     memory_type: str = "project_memory"
+    subtype: str = ""
     source_run: str = ""
     source_run_id: str = ""
     source_trace_ids: list[str] = field(default_factory=list)
@@ -34,6 +37,8 @@ class MemoryItem:
     source_tool_names: list[str] = field(default_factory=list)
     source_modified_files: list[str] = field(default_factory=list)
     parent_memory_ids: list[str] = field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -48,6 +53,7 @@ class MemoryCandidate:
     memory_type: str
     title: str
     body: str
+    subtype: str = ""
     tags: list[str] = field(default_factory=list)
     confidence: float = 0.0
     source_run: str = ""
@@ -66,6 +72,15 @@ class MemoryWriteResult:
     memory_type: str
     path: str
     index_path: str
+
+
+@dataclass(frozen=True)
+class MemoryArchiveResult:
+    memory_id: str
+    memory_type: str
+    source_path: str
+    archive_path: str
+    reason: str
 
 
 class FileMemoryStore:
@@ -90,13 +105,15 @@ class FileMemoryStore:
                 return item
         return None
 
-    def all(self) -> list[MemoryItem]:
+    def all(self, include_archived: bool = False) -> list[MemoryItem]:
         if not self.memory_dir.exists():
             return []
 
         items: list[MemoryItem] = []
         for path in sorted(self.memory_dir.rglob("*")):
             if path.suffix.lower() not in {".md", ".txt"} or not path.is_file():
+                continue
+            if not include_archived and MEMORY_ARCHIVE_DIR in path.relative_to(self.memory_dir).parts:
                 continue
             item = _load_memory_item(path, self.memory_dir)
             items.append(item)
@@ -114,6 +131,7 @@ class FileMemoryStore:
         frontmatter = {
             "id": memory_id,
             "type": memory_type,
+            "subtype": _slugify(candidate.subtype, limit=32) if candidate.subtype else "",
             "title": candidate.title.strip() or memory_id,
             "tags": [_slugify(tag, limit=32) for tag in candidate.tags if str(tag).strip()],
             "confidence": f"{_clamp_confidence(candidate.confidence):.2f}",
@@ -137,6 +155,39 @@ class FileMemoryStore:
             index_path=str(index_path),
         )
 
+    def archive(self, memory_ids: list[str], reason: str) -> list[MemoryArchiveResult]:
+        normalized_ids = {_normalize_id(memory_id) for memory_id in memory_ids if str(memory_id).strip()}
+        if not normalized_ids:
+            return []
+
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        archive_dir = self.memory_dir / MEMORY_ARCHIVE_DIR
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+        results: list[MemoryArchiveResult] = []
+        for item in self.all():
+            if item.memory_id not in normalized_ids:
+                continue
+            source = Path(item.source_path).resolve()
+            if not _is_relative_to(source, self.memory_dir.resolve()):
+                continue
+            archive_path = _avoid_overwrite(archive_dir / f"{timestamp}-{source.name}")
+            shutil.move(str(source), str(archive_path))
+            results.append(
+                MemoryArchiveResult(
+                    memory_id=item.memory_id,
+                    memory_type=item.memory_type,
+                    source_path=str(source),
+                    archive_path=str(archive_path),
+                    reason=reason,
+                )
+            )
+
+        if results:
+            self._append_archive_log(results)
+            self.update_index()
+        return results
+
     def update_index(self) -> Path:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         path = self.memory_dir / "index.json"
@@ -148,6 +199,7 @@ class FileMemoryStore:
                 {
                     "id": item.memory_id,
                     "type": item.memory_type,
+                    "subtype": item.subtype,
                     "title": item.title,
                     "tags": item.tags,
                     "path": _relative_or_absolute(Path(item.source_path), self.workspace),
@@ -155,12 +207,21 @@ class FileMemoryStore:
                     "source_run_id": item.source_run_id,
                     "source_trace_ids": item.source_trace_ids,
                     "parent_memory_ids": item.parent_memory_ids,
+                    "created_at": item.created_at,
+                    "updated_at": item.updated_at,
                 }
                 for item in items
             ],
         }
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         return path
+
+    def _append_archive_log(self, results: list[MemoryArchiveResult]) -> None:
+        path = self.memory_dir / MEMORY_ARCHIVE_DIR / "archive-log.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            for result in results:
+                handle.write(json.dumps(result.__dict__, ensure_ascii=False) + "\n")
 
     def _resolve_memory_dir(self, raw_path: str) -> Path:
         path = Path(raw_path)
@@ -176,7 +237,7 @@ class NullMemory:
     def get(self, memory_id: str) -> MemoryItem | None:
         return None
 
-    def all(self) -> list[MemoryItem]:
+    def all(self, include_archived: bool = False) -> list[MemoryItem]:
         return []
 
     def recall(self, task: str) -> str:
@@ -192,10 +253,13 @@ def _load_memory_item(path: Path, root: Path) -> MemoryItem:
     rel = path.relative_to(root).with_suffix("").as_posix()
     memory_id = _normalize_id(str(metadata.get("id") or rel))
     memory_type = _normalize_memory_type(str(metadata.get("type") or _infer_type_from_path(path, root)))
+    subtype = str(metadata.get("subtype") or "")
     title = str(metadata.get("title") or _first_heading(body) or path.stem)
     tags = _as_list(metadata.get("tags"))
     source_run = str(metadata.get("source_run") or "")
     source_run_id = str(metadata.get("source_run_id") or source_run)
+    created_at = str(metadata.get("created_at") or _mtime_iso(path))
+    updated_at = str(metadata.get("updated_at") or created_at)
     return MemoryItem(
         memory_id=memory_id,
         title=title,
@@ -203,6 +267,7 @@ def _load_memory_item(path: Path, root: Path) -> MemoryItem:
         tags=tags,
         source_path=str(path),
         memory_type=memory_type,
+        subtype=subtype,
         source_run=source_run,
         source_run_id=source_run_id,
         source_trace_ids=_as_list(metadata.get("source_trace_ids")),
@@ -210,6 +275,8 @@ def _load_memory_item(path: Path, root: Path) -> MemoryItem:
         source_tool_names=_as_list(metadata.get("source_tool_names")),
         source_modified_files=_as_list(metadata.get("source_modified_files")),
         parent_memory_ids=_as_list(metadata.get("parent_memory_ids")),
+        created_at=created_at,
+        updated_at=updated_at,
     )
 
 
@@ -244,8 +311,9 @@ def _score_memory(query: str, item: MemoryItem) -> tuple[int, str]:
         reasons.append("body_phrase")
 
     if item.memory_type == "session_memory":
-        score = max(1, int(round(score * 0.6)))
-        reasons.append("type_weight:session_memory:0.6")
+        weight = 0.75 if item.subtype == "session_summary" else 0.6
+        score = max(1, int(round(score * weight)))
+        reasons.append(f"type_weight:session_memory:{weight}")
 
     return score, ", ".join(reasons[:8])
 
@@ -337,7 +405,7 @@ def _candidate_id(candidate: MemoryCandidate, timestamp: str) -> str:
         "session_memory": "sess",
     }[memory_type]
     source_run = candidate.source_run_id or candidate.source_run
-    digest_source = "|".join([candidate.title, candidate.body, source_run, timestamp])
+    digest_source = "|".join([candidate.title, candidate.subtype, candidate.body, source_run, timestamp])
     digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:10]
     date = timestamp[:10].replace("-", "")
     return f"{prefix}_{date}_{digest}"
@@ -396,3 +464,15 @@ def _relative_or_absolute(path: Path, root: Path) -> str:
         return path.resolve().relative_to(root).as_posix()
     except ValueError:
         return str(path)
+
+
+def _mtime_iso(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True

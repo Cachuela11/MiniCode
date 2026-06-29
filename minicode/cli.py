@@ -8,8 +8,10 @@ from datetime import datetime
 from pathlib import Path
 
 from .agent import AgentConfig, CodingAgent
+from .dreaming import DreamingConfig, MemoryDreamer
 from .eval import run_eval
 from .llm import DeepSeekClient
+from .memory import FileMemoryStore
 from .permissions import AlwaysApprove, ConsoleApproval, NeverApprove
 from .sandbox import DockerSandbox
 from .skills import SkillCatalog
@@ -19,6 +21,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the MiniCode coding agent.")
     parser.add_argument("task", nargs="*", help="Coding task for the agent.")
     parser.add_argument("--check", action="store_true", help="Run environment checks and exit.")
+    parser.add_argument(
+        "--dream",
+        action="store_true",
+        help="Run one forced memory dreaming pass and exit.",
+    )
     parser.add_argument("--model", default=os.getenv("MINICODE_MODEL", "deepseek-v4-flash"))
     parser.add_argument(
         "--deepseek-url",
@@ -166,6 +173,48 @@ def main(argv: list[str] | None = None) -> int:
         default=int(os.getenv("MINICODE_MEMORY_MAX_CANDIDATES", "5")),
         help="Maximum memory candidates to request from one reflection pass.",
     )
+    parser.add_argument(
+        "--dreaming",
+        choices=["off", "auto"],
+        default=os.getenv("MINICODE_DREAMING", "auto"),
+        help="Memory dreaming mode after a run: off or auto.",
+    )
+    parser.add_argument(
+        "--dream-session-threshold",
+        type=int,
+        default=int(os.getenv("MINICODE_DREAM_SESSION_THRESHOLD", "8")),
+        help="Auto dreaming trigger after this many new session memories.",
+    )
+    parser.add_argument(
+        "--dream-memory-threshold",
+        type=int,
+        default=int(os.getenv("MINICODE_DREAM_MEMORY_THRESHOLD", "40")),
+        help="Auto dreaming trigger after this many new active memories.",
+    )
+    parser.add_argument(
+        "--dream-interval-hours",
+        type=int,
+        default=int(os.getenv("MINICODE_DREAM_INTERVAL_HOURS", "24")),
+        help="Auto dreaming trigger interval when new session memories exist.",
+    )
+    parser.add_argument(
+        "--dream-max-batch-size",
+        type=int,
+        default=int(os.getenv("MINICODE_DREAM_MAX_BATCH_SIZE", "20")),
+        help="Maximum memories sent to one dreaming pass.",
+    )
+    parser.add_argument(
+        "--dream-min-confidence",
+        type=float,
+        default=float(os.getenv("MINICODE_DREAM_MIN_CONFIDENCE", "0.75")),
+        help="Minimum confidence required before writing a dreamed memory.",
+    )
+    parser.add_argument(
+        "--dream-session-hot-days",
+        type=float,
+        default=float(os.getenv("MINICODE_DREAM_SESSION_HOT_DAYS", "2")),
+        help="Raw session memories newer than this many days stay active and are not dreamed.",
+    )
     args = parser.parse_args(argv)
 
     workspace = Path(args.workspace).resolve()
@@ -176,6 +225,24 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check:
         return _check_environment(llm=llm, sandbox=sandbox, model=args.model)
+
+    if args.dream:
+        result = MemoryDreamer(
+            llm=llm,
+            model=args.model,
+            memory_store=FileMemoryStore(workspace=workspace, memory_dir=args.memory_dir),
+            config=DreamingConfig(
+                mode=args.dreaming,
+                session_threshold=args.dream_session_threshold,
+                memory_threshold=args.dream_memory_threshold,
+                interval_hours=args.dream_interval_hours,
+                max_batch_size=args.dream_max_batch_size,
+                min_confidence=args.dream_min_confidence,
+                session_hot_days=args.dream_session_hot_days,
+            ),
+        ).run(force=True)
+        print(json.dumps(result.to_log_dict(), indent=2, ensure_ascii=False))
+        return 0 if result.status != "error" else 1
 
     if args.eval:
         report = run_eval(
@@ -230,6 +297,13 @@ def main(argv: list[str] | None = None) -> int:
             memory_trigger_mode=args.memory_trigger,
             memory_min_confidence=args.memory_min_confidence,
             memory_max_candidates=args.memory_max_candidates,
+            dreaming_mode=args.dreaming,
+            dreaming_session_threshold=args.dream_session_threshold,
+            dreaming_memory_threshold=args.dream_memory_threshold,
+            dreaming_interval_hours=args.dream_interval_hours,
+            dreaming_max_batch_size=args.dream_max_batch_size,
+            dreaming_min_confidence=args.dream_min_confidence,
+            dreaming_session_hot_days=args.dream_session_hot_days,
         ),
         skill_catalog=skill_catalog,
     )

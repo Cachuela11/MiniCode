@@ -99,6 +99,7 @@ MiniCode/
     eval.py
     harness.py
     memory.py
+    dreaming.py
     skills/
       __init__.py
       schema.py
@@ -124,13 +125,14 @@ MiniCode/
 - `minicode/observability.py`：结构化日志模型。记录每一步的模型输入摘要、action、tool 参数、权限决策、输出、修改文件、token 和耗时。
 - `minicode/eval.py`：内置 eval 任务集和指标汇总。用于衡量任务成功率、测试通过率、tool 调用次数、危险命令等。
 - `minicode/harness.py`：后续 harness 占位。未来用于自动判断项目类型、运行验证命令和驱动修复循环。
-- `minicode/memory.py`：文件型 memory store。管理 `.minicode/memory` 下的 Markdown/Text 记忆，支持检索、写入和索引更新。
+- `minicode/memory.py`：文件型 memory store。管理 `.minicode/memory` 下的 Markdown/Text 记忆，支持检索、写入、归档和索引更新。
+- `minicode/dreaming.py`：离线 memory dreaming。负责判断触发条件、精确去重、调用 DeepSeek 合并摘要，并把旧长期记忆归档。
 - `minicode/skills/schema.py`：定义 `Skill`、`SelectedSkill`、`SkillRoute` 等数据结构。
 - `minicode/skills/loader.py`：读取 `.skills/*.md`，解析 frontmatter 和正文。
 - `minicode/skills/catalog.py`：管理已加载的 skill，提供按名称查询和枚举能力。
 - `minicode/skills/router.py`：Skill 路由总控。先做元信息粗召回，再交给 DeepSeek 精排候选 skill。
 - `minicode/skills/prompt.py`：把选中的 skill 渲染成 prompt 文本，注入给模型。
-- `minicode/evolution.py`：记忆沉淀触发器。当前实现“session 摘要 -> 规则信号初筛 -> DeepSeek 长期记忆分类 -> 写入 memory”，dreaming 演进后续再做。
+- `minicode/evolution.py`：记忆沉淀触发器。当前实现“session 摘要 -> 规则信号初筛 -> DeepSeek 长期记忆分类 -> 写入 memory”。
 
 ## Skill 体系
 
@@ -221,7 +223,7 @@ flowchart TB
 
 ## 记忆触发闭环
 
-当前实现的是在线记忆触发闭环，不包含离线 dreaming 演进。记忆沉淀发生在一次 agent run 结束之后，不在每个 step 后触发。
+当前实现包含两段：在线记忆沉淀和第一版离线 dreaming。记忆沉淀发生在一次 agent run 结束之后，不在每个 step 后触发；dreaming 在沉淀之后做阈值检查，命中后才整理已有 memory。
 
 ```mermaid
 flowchart TD
@@ -238,11 +240,16 @@ flowchart TD
     I --> K
     J --> K
     K --> L[Write run_log.memory_evolution]
+    L --> M[Check dreaming triggers]
+    M -->|hit| N[Deduplicate / consolidate memories]
+    M -->|miss| O[Skip dreaming]
+    N --> P[Write run_log.memory_dreaming]
+    O --> P
 ```
 
 四类记忆：
 
-- `session_memory`：每次 run 的情景摘要，记录任务、结果、关键文件、工具使用和测试状态。
+- `session_memory`：session 层记忆。原始 run 摘要记录任务、结果、关键文件、工具使用和测试状态；dreaming 后也可以生成 `subtype=session_summary` 的压缩 session 摘要。
 - `project_memory`：项目事实、架构约定、文件组织、设计决策。
 - `procedural_memory`：可复用的修复流程、测试流程、工具使用经验。
 - `experience_memory`：明确表达过的协作经验和稳定工作偏好。
@@ -255,11 +262,11 @@ flowchart TD
 - 规则信号来自 session 摘要里的任务、最终答案、修改文件、tool 使用、测试结果、危险/无效命令等。
 - 如果没有命中长期信号，本次记忆沉淀到 session memory 为止，不调用 DeepSeek 做长期分类。
 - 如果命中长期信号，DeepSeek 只负责把 session 摘要精判并分类为 `project_memory`、`procedural_memory`、`experience_memory` 三类候选。
-- DeepSeek 不再负责生成 `session_memory`，`session_memory` 始终由本地摘要生成。
+- 在线沉淀阶段的原始 `session_memory` 始终由本地摘要生成；dreaming 阶段可以生成 `subtype=session_summary` 的压缩版 session memory。
 - 如果 DeepSeek 长期分类失败，已经写入的 `session_memory` 会保留，不会让主任务失败。
 - 记忆写入结果会记录到 run log 的 `memory_evolution` 字段。
 - 每条新 memory 会写入 `source_run_id`、`source_trace_ids`、`source_step_ids`、`source_tool_names`、`source_modified_files` 等来源字段。
-- 长期记忆会通过 `parent_memory_ids` 指向它来自哪条 `session_memory`，方便后续 dreaming 回查证据链。
+- dreaming 生成的 `session_summary` 和长期记忆都会通过 `parent_memory_ids` 指向来源 session，方便回查证据链。
 
 存储结构：
 
@@ -269,7 +276,9 @@ flowchart TD
   procedural/
   experience/
   sessions/
+  _archive/
   index.json
+  dreaming-state.json
 ```
 
 写入规则：
@@ -278,10 +287,18 @@ flowchart TD
 - `MINICODE_MEMORY_TRIGGER=off` 会关闭记忆沉淀。
 - 四类记忆都直接写入对应目录，并参与 `search_memory`。
 - `session_memory` 始终写入 `sessions/` 目录，并参与 `search_memory`。
-- `session_memory` 当前检索分数乘以 `0.6`，作为情景记忆降权，避免压过长期记忆。
-- `index.json` 是记忆目录和元数据索引，记录 `id`、`type`、`title`、`tags`、`path`、`source_run_id`、`source_trace_ids`、`parent_memory_ids`。当前检索仍直接扫描 Markdown/Text 文件，`index.json` 主要服务人工查看、后续 context memory index 和 dreaming 批处理。
+- 原始 `session_memory` 当前检索分数乘以 `0.6`，`subtype=session_summary` 乘以 `0.75`，避免 session 层压过长期记忆。
+- `index.json` 是记忆目录和元数据索引，记录 `id`、`type`、`subtype`、`title`、`tags`、`path`、`source_run_id`、`source_trace_ids`、`parent_memory_ids`。当前检索仍直接扫描 active Markdown/Text 文件，`index.json` 主要服务人工查看、后续 context memory index 和 dreaming 批处理。
 
-后续 dreaming 记忆演进会区分四类记忆处理：`session_memory` 负责批量复盘和升级，`project_memory` 负责项目事实合并与冲突消解，`procedural_memory` 负责流程抽象和 skill 候选生成，`experience_memory` 负责稳定协作经验的合并、去重和更新。
+第一版 dreaming：
+
+- 触发方式：手动 `python -m minicode --dream` 强制执行；自动模式下在 run 结束后检查阈值。
+- 自动触发规则：发现可处理范围内的精确重复 memory；超过热窗口的原始 `session_memory` 数量达到 `MINICODE_DREAM_SESSION_THRESHOLD`；新增 active memory 数量达到 `MINICODE_DREAM_MEMORY_THRESHOLD`；已有上次 dreaming 记录且超过 `MINICODE_DREAM_INTERVAL_HOURS`，同时存在超过热窗口的原始 session。
+- 热窗口规则：默认近 `2` 天的原始 `session_memory` 不参与 dreaming、不去重、不归档，继续完整参与检索。
+- 处理内容：先本地归档可处理范围内的精确重复 memory；再把超过热窗口的原始 session 和部分长期记忆交给 DeepSeek 做合并、摘要和长期记忆候选生成。
+- 写入策略：dreaming 可以写入两类候选：`session_memory/subtype=session_summary` 作为 session 层压缩摘要；`project_memory`、`procedural_memory`、`experience_memory` 作为单独判断后的长期记忆。
+- 归档策略：原始旧 session 只有在对应 `session_summary` 成功写入后才归档；被 LLM 合并且完全被新长期记忆替代的旧长期 memory 也会归档。普通检索和 `index.json` 不读取 `_archive/`。
+- 状态文件：`dreaming-state.json` 记录上次 dreaming 时间、已处理 session id 和已处理 memory id。
 
 ## 当前支持的 Tools
 
@@ -392,12 +409,25 @@ flowchart TD
 - `MINICODE_MEMORY_TRIGGER`：记忆沉淀模式，`off` / `on`，默认 `on`
 - `MINICODE_MEMORY_MIN_CONFIDENCE`：候选记忆最低置信度，默认 `0.7`
 - `MINICODE_MEMORY_MAX_CANDIDATES`：每次反思最多生成的候选记忆数，默认 `5`
+- `MINICODE_DREAMING`：run 结束后的 dreaming 模式，`off` / `auto`，默认 `auto`
+- `MINICODE_DREAM_SESSION_THRESHOLD`：新增多少条 `session_memory` 后自动触发 dreaming，默认 `8`
+- `MINICODE_DREAM_MEMORY_THRESHOLD`：新增多少条 active memory 后自动触发 dreaming，默认 `40`
+- `MINICODE_DREAM_INTERVAL_HOURS`：距离上次 dreaming 超过多少小时且存在新 session 时触发，默认 `24`
+- `MINICODE_DREAM_MAX_BATCH_SIZE`：单次 dreaming 最多处理多少条 memory，默认 `20`
+- `MINICODE_DREAM_MIN_CONFIDENCE`：dreaming 写入长期记忆的最低置信度，默认 `0.75`
+- `MINICODE_DREAM_SESSION_HOT_DAYS`：原始 session memory 保持完整 active 的天数，默认 `2`
 
 示例：
 
 ```powershell
 $env:MINICODE_MODEL = "deepseek-v4-pro"
 python -m minicode "list files"
+```
+
+手动执行一次 memory dreaming：
+
+```powershell
+python -m minicode --dream
 ```
 
 审批模式：

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .context import ContextConfig, ContextManager, build_initial_context, render_context_layer_prompt
+from .dreaming import DreamingConfig, MemoryDreamer
 from .evolution import SelfEvolution
 from .llm import LLMResponse
 from .memory import FileMemoryStore
@@ -67,6 +68,13 @@ class AgentConfig:
     memory_trigger_mode: str = "on"
     memory_min_confidence: float = 0.7
     memory_max_candidates: int = 5
+    dreaming_mode: str = "auto"
+    dreaming_session_threshold: int = 8
+    dreaming_memory_threshold: int = 40
+    dreaming_interval_hours: int = 24
+    dreaming_max_batch_size: int = 20
+    dreaming_min_confidence: float = 0.75
+    dreaming_session_hot_days: float = 2.0
 
 
 @dataclass
@@ -256,6 +264,22 @@ class CodingAgent:
         ).on_run_complete(run_log)
         run_log.memory_evolution = memory_result.to_log_dict()
         run_log.token_usage.add(memory_result.token_usage)
+        dreaming_result = MemoryDreamer(
+            llm=self.llm,
+            model=self.config.model,
+            memory_store=self.memory_store,
+            config=DreamingConfig(
+                mode=self.config.dreaming_mode,
+                session_threshold=self.config.dreaming_session_threshold,
+                memory_threshold=self.config.dreaming_memory_threshold,
+                interval_hours=self.config.dreaming_interval_hours,
+                max_batch_size=self.config.dreaming_max_batch_size,
+                min_confidence=self.config.dreaming_min_confidence,
+                session_hot_days=self.config.dreaming_session_hot_days,
+            ),
+        ).run(force=False)
+        run_log.memory_dreaming = dreaming_result.to_log_dict()
+        run_log.token_usage.add(dreaming_result.token_usage)
         run_log.duration_ms = run_timer.elapsed_ms()
 
     def _run_final_test(self) -> TestResult | None:
