@@ -292,6 +292,63 @@ flowchart TD
 
 第一版 dreaming：
 
+Dreaming 总流程：
+
+```mermaid
+flowchart TD
+    A[Dreaming start] --> B[Load active memories]
+    B --> C[Read dreaming-state.json]
+    C --> D[Build eligible items by layer]
+
+    D --> E1[session_memory<br/>only raw sessions older than hot window]
+    D --> E2[project_memory]
+    D --> E3[procedural_memory]
+    D --> E4[experience_memory]
+
+    E1 --> F[Check four triggers per layer]
+    E2 --> F
+    E3 --> F
+    E4 --> F
+
+    F --> G{Any layer triggered?}
+    G -->|no| H[Skip dreaming]
+    G -->|yes| K[Archive exact duplicates in eligible scope]
+    K --> I[Build layers_to_process]
+    I --> J[Run triggered layers serially<br/>session -> project -> procedural -> experience]
+    J --> L[Select current layer batch]
+    L --> M[DeepSeek layer dreaming]
+    M --> N[Write same-layer consolidation]
+    N --> O{Promote to next layer?}
+    O -->|yes| P[Write next-layer memory]
+    O -->|no| Q[No promotion]
+    P --> R[Archive superseded source memories]
+    Q --> R
+    R --> S{More triggered layers?}
+    S -->|yes| L
+    S -->|no| T[Update index.json and dreaming-state.json]
+    T --> U[Write run_log.memory_dreaming]
+```
+
+单层 dreaming 输出逻辑：
+
+```mermaid
+flowchart LR
+    A[Current layer batch] --> B[DeepSeek]
+    B --> C[Same-layer candidate]
+    B --> D[Promotion candidate]
+
+    C --> E{Valid and confident?}
+    E -->|yes| F[Write current layer memory]
+    E -->|no| G[Skip]
+
+    D --> H{Should promote?}
+    H -->|yes| I[Write next layer memory]
+    H -->|no| J[Skip promotion]
+
+    F --> K[Archive only superseded current-layer sources]
+    I --> L[Keep sources traceable via parent_memory_ids]
+```
+
 - 触发方式：手动 `python -m minicode --dream` 强制执行；自动模式下在 run 结束后检查阈值。
 - 自动触发规则按层计算，四层分别是 `session_memory -> project_memory -> procedural_memory -> experience_memory`。每层都支持精确重复、数量阈值、估算 token 阈值、时间间隔四类触发。
 - `session_memory` 层只处理超过热窗口的原始 session，数量阈值使用 `MINICODE_DREAM_SESSION_THRESHOLD`，token 阈值使用 `MINICODE_DREAM_SESSION_TOKEN_THRESHOLD`。
