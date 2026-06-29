@@ -181,9 +181,60 @@ search_memory -> MemoryToolRetriever -> RetrievalTrace(kind=memory)
 
 - `schema.py`：定义 `RetrievalCandidate`、`RetrievalResult`、`RetrievalStage`、`RetrievalTrace`。
 - `skill.py`：包装现有 skill 元信息召回，不做 memory 降权。
-- `memory.py`：包装现有 memory 检索，后续动态权重、衰减、usage feedback 和 diversity rerank 会在这里实现。
+- `memory.py`：实现 memory 检索三阶段：关键词粗召回、动态降权、本地 topK 后交给 DeepSeek 精排；如果 LLM 精排失败，会退回本地加权结果。
 - `ranking.py`：放通用文本规范化和 reason 处理。
 - 每次 `search_skills` / `search_memory` 的结果都会写入 step log 的 `retrieval_trace`，方便后续 eval 对比检索质量。
+
+Memory 检索召回与精排流程：
+
+```mermaid
+flowchart TD
+    A[search_memory query] --> B[lexical_recall<br/>title / tag / body keyword score]
+    B --> C[Coarse candidates<br/>default top 30]
+    C --> D[weighted_rerank]
+    D --> E[Type weight]
+    D --> F[Confidence weight]
+    D --> G[Importance weight]
+    D --> H[Recency decay]
+    D --> I[Usage boost]
+    D --> J[Source quality]
+    D --> K[Superseded penalty]
+    D --> L[Intent match]
+    D --> M[Redundancy penalty]
+    E --> N[Local weighted ranking]
+    F --> N
+    G --> N
+    H --> N
+    I --> N
+    J --> N
+    K --> N
+    L --> N
+    M --> N
+    N --> O[Take top candidates<br/>max user limit or 8]
+    O --> P{DeepSeek rerank available?}
+    P -->|yes| Q[llm_rerank<br/>return memory_ids order]
+    P -->|no / error| R[Fallback local weighted order]
+    Q --> S[Final topK]
+    R --> S
+    S --> T[Return observation<br/>write retrieval_trace]
+```
+
+本地降权/加权规则：
+
+- 原始分数：来自 `FileMemoryStore.search()` 的关键词粗召回，主要看 title、tag、body 是否命中 query。
+- 本地加权公式：`weighted_score = raw_score * type * confidence * importance * recency * usage * source_quality * superseded * intent * redundancy`。
+- `type`：`experience_memory=1.25`，`procedural_memory=1.15`，`project_memory=1.10`，`session_summary=0.75`，原始 `session_memory=0.55`。
+- `confidence`：`0.5 + 0.5 * confidence`，缺省按 `0.7` 处理。
+- `importance`：`0.7 + 0.3 * importance`。
+- `recency`：按记忆类型使用不同半衰期；原始 session 为 `3` 天且最低 `0.15`，session summary 为 `14` 天且最低 `0.35`，project 为 `180` 天且最低 `0.65`，procedural 为 `90` 天且最低 `0.65`，experience 为 `365` 天且最低 `0.70`。
+- `usage`：`1 + min(log1p(usage_count) * 0.08, 0.30)`，常被加载的 memory 会小幅上升。
+- `source_quality`：`0.6 + 0.4 * source_quality`。
+- `superseded`：如果 `superseded_by` 不为空，直接降到 `0.1`；否则为 `1.0`。
+- `intent`：根据 query 意图做轻量提升；项目/架构类 query 提升 project，流程/修复/测试类 query 提升 procedural，偏好/风格类 query 提升 experience，最近/刚才/session 类 query 提升 session。
+- `redundancy`：同源重复候选只保留第一条原权重，后续同源候选降为 `0.75`。
+- 本地加权后只把少量 top candidates 交给 DeepSeek 精排；如果 DeepSeek 不可用或返回异常，就退回本地加权排序。
+
+`search_memory` 会把粗召回、降权和 LLM 精排写入 `retrieval_trace`。`load_memory` 成功后会更新该 memory 的 `usage_count` 和 `last_used_at`，后续检索会略微提升常用 memory。
 
 ## 多层 Context
 

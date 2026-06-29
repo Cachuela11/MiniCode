@@ -111,6 +111,8 @@ class CodingAgent:
             sandbox=sandbox,
             skill_catalog=self.skill_catalog,
             memory_store=self.memory_store,
+            llm=self.llm,
+            model=self.config.model,
         )
         self.tools.set_skill_catalog(self.skill_catalog)
         self.tools.set_memory_store(self.memory_store)

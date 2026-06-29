@@ -38,12 +38,16 @@ class ToolRegistry:
         context_manager: Any | None = None,
         skill_catalog: SkillCatalog | None = None,
         memory_store: FileMemoryStore | NullMemory | None = None,
+        llm: Any | None = None,
+        model: str = "",
     ):
         self.workspace = workspace.resolve()
         self.sandbox = sandbox
         self.context_manager = context_manager
         self.skill_catalog = skill_catalog or SkillCatalog.empty()
         self.memory_store = memory_store or NullMemory()
+        self.llm = llm
+        self.model = model
         self._tools: dict[str, ToolHandler] = {
             "run_shell": self._run_shell,
             "list_files": self._list_files,
@@ -263,7 +267,7 @@ class ToolRegistry:
         if not query:
             message = "ERROR: search_memory requires args.query."
             return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
-        retrieval = MemoryToolRetriever(self.memory_store).retrieve(query, limit=limit)
+        retrieval = MemoryToolRetriever(self.memory_store, llm=self.llm, model=self.model).retrieve(query, limit=limit)
         results = retrieval.results
         if not results:
             output = "No matching memories found."
@@ -312,6 +316,7 @@ class ToolRegistry:
             available = ", ".join(memory.memory_id for memory in self.memory_store.all()) or "none"
             message = f"ERROR: unknown memory {memory_id!r}. Available memories: {available}"
             return ToolResult(False, message, stderr=message, exit_code=1)
+        self.memory_store.record_use(memory_id)
         body = item.body
         truncated = False
         if len(body) > max_chars:

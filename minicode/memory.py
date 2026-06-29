@@ -39,6 +39,12 @@ class MemoryItem:
     parent_memory_ids: list[str] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    confidence: float = 0.0
+    importance: float = 0.5
+    usage_count: int = 0
+    last_used_at: str = ""
+    source_quality: float = 0.8
+    superseded_by: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -56,6 +62,9 @@ class MemoryCandidate:
     subtype: str = ""
     tags: list[str] = field(default_factory=list)
     confidence: float = 0.0
+    importance: float = 0.5
+    source_quality: float = 0.8
+    superseded_by: list[str] = field(default_factory=list)
     source_run: str = ""
     source_run_id: str = ""
     source_trace_ids: list[str] = field(default_factory=list)
@@ -89,7 +98,7 @@ class FileMemoryStore:
         self.memory_dir = self._resolve_memory_dir(memory_dir)
 
     def search(self, query: str, limit: int = 5) -> list[MemorySearchResult]:
-        limit = max(1, min(limit, 20))
+        limit = max(1, min(limit, 100))
         results: list[MemorySearchResult] = []
         for item in self.all():
             score, reason = _score_memory(query, item)
@@ -135,6 +144,11 @@ class FileMemoryStore:
             "title": candidate.title.strip() or memory_id,
             "tags": [_slugify(tag, limit=32) for tag in candidate.tags if str(tag).strip()],
             "confidence": f"{_clamp_confidence(candidate.confidence):.2f}",
+            "importance": f"{_clamp_confidence(candidate.importance):.2f}",
+            "usage_count": "0",
+            "last_used_at": "",
+            "source_quality": f"{_clamp_confidence(candidate.source_quality):.2f}",
+            "superseded_by": _clean_list(candidate.superseded_by, limit=32),
             "source_run": candidate.source_run,
             "source_run_id": candidate.source_run_id,
             "source_trace_ids": _clean_list(candidate.source_trace_ids, limit=32),
@@ -154,6 +168,21 @@ class FileMemoryStore:
             path=str(path),
             index_path=str(index_path),
         )
+
+    def record_use(self, memory_id: str) -> bool:
+        item = self.get(memory_id)
+        if item is None:
+            return False
+        path = Path(item.source_path)
+        text = path.read_text(encoding="utf-8", errors="replace")
+        metadata, body = _split_frontmatter(text)
+        now = datetime.now(timezone.utc).isoformat()
+        metadata["usage_count"] = str(item.usage_count + 1)
+        metadata["last_used_at"] = now
+        metadata["updated_at"] = now
+        path.write_text(_render_memory_markdown(metadata, body), encoding="utf-8")
+        self.update_index()
+        return True
 
     def archive(self, memory_ids: list[str], reason: str) -> list[MemoryArchiveResult]:
         normalized_ids = {_normalize_id(memory_id) for memory_id in memory_ids if str(memory_id).strip()}
@@ -209,6 +238,12 @@ class FileMemoryStore:
                     "parent_memory_ids": item.parent_memory_ids,
                     "created_at": item.created_at,
                     "updated_at": item.updated_at,
+                    "confidence": item.confidence,
+                    "importance": item.importance,
+                    "usage_count": item.usage_count,
+                    "last_used_at": item.last_used_at,
+                    "source_quality": item.source_quality,
+                    "superseded_by": item.superseded_by,
                 }
                 for item in items
             ],
@@ -240,6 +275,9 @@ class NullMemory:
     def all(self, include_archived: bool = False) -> list[MemoryItem]:
         return []
 
+    def record_use(self, memory_id: str) -> bool:
+        return False
+
     def recall(self, task: str) -> str:
         return ""
 
@@ -260,6 +298,11 @@ def _load_memory_item(path: Path, root: Path) -> MemoryItem:
     source_run_id = str(metadata.get("source_run_id") or source_run)
     created_at = str(metadata.get("created_at") or _mtime_iso(path))
     updated_at = str(metadata.get("updated_at") or created_at)
+    confidence = _as_float(metadata.get("confidence"), default=0.0)
+    importance = _as_float(metadata.get("importance"), default=0.5)
+    usage_count = _as_int(metadata.get("usage_count"), default=0)
+    last_used_at = str(metadata.get("last_used_at") or "")
+    source_quality = _as_float(metadata.get("source_quality"), default=0.8)
     return MemoryItem(
         memory_id=memory_id,
         title=title,
@@ -277,6 +320,12 @@ def _load_memory_item(path: Path, root: Path) -> MemoryItem:
         parent_memory_ids=_as_list(metadata.get("parent_memory_ids")),
         created_at=created_at,
         updated_at=updated_at,
+        confidence=confidence,
+        importance=importance,
+        usage_count=usage_count,
+        last_used_at=last_used_at,
+        source_quality=source_quality,
+        superseded_by=_as_list(metadata.get("superseded_by")),
     )
 
 
@@ -355,6 +404,22 @@ def _as_list(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value]
     return [str(value)]
+
+
+def _as_float(value: object, default: float) -> float:
+    try:
+        parsed = float(str(value))
+    except (TypeError, ValueError):
+        parsed = default
+    return max(0.0, min(1.0, parsed))
+
+
+def _as_int(value: object, default: int) -> int:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        parsed = default
+    return max(0, parsed)
 
 
 def _first_heading(text: str) -> str:
