@@ -32,6 +32,13 @@ class WeightedMemoryResult:
     reasons: list[str]
 
 
+@dataclass(frozen=True)
+class LlmRerankResult:
+    ranked_ids: list[str]
+    reason: str
+    token_usage: TokenUsage
+
+
 class MemoryToolRetriever:
     """Tool-facing memory retrieval adapter.
 
@@ -61,11 +68,11 @@ class MemoryToolRetriever:
         weighted_results = sorted(weighted_results, key=lambda item: (-item.final_score, item.result.item.memory_id))
 
         llm_error = ""
-        llm_ranked_ids: list[str] = []
+        llm_result = LlmRerankResult(ranked_ids=[], reason="", token_usage=TokenUsage())
         rerank_candidates = weighted_results[: max(limit, self.llm_candidate_limit)]
         if self.llm is not None and self.model and rerank_candidates:
             try:
-                llm_ranked_ids, llm_usage = _llm_rerank(
+                llm_result = _llm_rerank(
                     llm=self.llm,
                     model=self.model,
                     query=query,
@@ -73,21 +80,21 @@ class MemoryToolRetriever:
                     limit=limit,
                 )
             except Exception as exc:
-                llm_ranked_ids = []
-                llm_usage = TokenUsage()
+                llm_result = LlmRerankResult(ranked_ids=[], reason="", token_usage=TokenUsage())
                 llm_error = str(exc)
-        else:
-            llm_usage = TokenUsage()
 
-        if llm_ranked_ids:
+        if llm_result.ranked_ids:
             by_id = {item.result.item.memory_id: item for item in rerank_candidates}
-            selected_weighted = [by_id[memory_id] for memory_id in llm_ranked_ids if memory_id in by_id]
-            selected_weighted.extend(item for item in rerank_candidates if item.result.item.memory_id not in llm_ranked_ids)
+            selected_weighted = [by_id[memory_id] for memory_id in llm_result.ranked_ids if memory_id in by_id]
+            selected_weighted.extend(
+                item for item in rerank_candidates if item.result.item.memory_id not in llm_result.ranked_ids
+            )
             selected_weighted = selected_weighted[:limit]
             reranker = "llm"
         else:
             selected_weighted = weighted_results[:limit]
             reranker = "local_weighted"
+        selected_ids = [item.result.item.memory_id for item in selected_weighted]
 
         results = [
             MemorySearchResult(
@@ -131,10 +138,14 @@ class MemoryToolRetriever:
                     metadata={
                         "enabled": self.llm is not None and bool(self.model),
                         "error": llm_error,
+                        "candidate_ids": [item.result.item.memory_id for item in rerank_candidates],
+                        "ranked_ids": llm_result.ranked_ids,
+                        "selected_ids": selected_ids,
+                        "reason": llm_result.reason,
                         "token_usage": {
-                            "prompt_tokens": llm_usage.prompt_tokens,
-                            "completion_tokens": llm_usage.completion_tokens,
-                            "total_tokens": llm_usage.total_tokens,
+                            "prompt_tokens": llm_result.token_usage.prompt_tokens,
+                            "completion_tokens": llm_result.token_usage.completion_tokens,
+                            "total_tokens": llm_result.token_usage.total_tokens,
                         },
                     },
                 ),
@@ -211,7 +222,7 @@ def _llm_rerank(
     query: str,
     candidates: list[WeightedMemoryResult],
     limit: int,
-) -> tuple[list[str], TokenUsage]:
+) -> LlmRerankResult:
     payload = {
         "query": query,
         "limit": limit,
@@ -236,7 +247,9 @@ def _llm_rerank(
             "role": "system",
             "content": (
                 "You rerank MiniCode memory search candidates. Return JSON only. "
-                "Choose the most useful memories for the query. Prefer durable, specific, non-duplicate memories. "
+                "Choose the most useful memories for the query. "
+                "Use only candidate memory_id values from the input. "
+                "Prefer specific, actionable, currently relevant memories. "
                 'Schema: {"memory_ids":["id"],"reason":"short reason"}.'
             ),
         },
@@ -247,9 +260,14 @@ def _llm_rerank(
     memory_ids = data.get("memory_ids", [])
     if not isinstance(memory_ids, list):
         memory_ids = []
+    reason = str(data.get("reason") or "").strip()
     allowed = {item.result.item.memory_id for item in candidates}
     ranked_ids = [str(memory_id) for memory_id in memory_ids if str(memory_id) in allowed]
-    return ranked_ids[:limit], response.token_usage
+    return LlmRerankResult(
+        ranked_ids=ranked_ids[:limit],
+        reason=_preview(reason, limit=500),
+        token_usage=response.token_usage,
+    )
 
 
 def _find_weighted(result: MemorySearchResult, weighted_results: list[WeightedMemoryResult]) -> WeightedMemoryResult | None:

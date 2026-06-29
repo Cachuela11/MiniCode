@@ -225,6 +225,14 @@ flowchart TD
 - `intent`：根据 query 意图做轻量提升；项目/架构类 query 提升 project，流程/修复/测试类 query 提升 procedural，偏好/风格类 query 提升 experience，最近/刚才/session 类 query 提升 session。
 - 本地加权后只把少量 top candidates 交给 DeepSeek 精排；如果 DeepSeek 不可用或返回异常，就退回本地加权排序。
 
+LLM 精排逻辑：
+
+- 输入：query、limit，以及本地 top candidates 的 `memory_id`、type、subtype、title、tags、body preview、base score、weighted score、weights 和 reasons。
+- 输出：DeepSeek 只允许返回候选里的 `memory_ids` 顺序和一个简短 `reason`，不能生成新的 memory id。
+- 过滤：MiniCode 会丢弃不在候选集里的 id；如果 LLM 返回数量不足，会用本地加权顺序补齐。
+- 回退：如果 DeepSeek 不可用、返回空结果或 JSON 解析失败，直接使用本地加权排序。
+- 观测：`retrieval_trace` 会记录 `candidate_ids`、`ranked_ids`、`selected_ids`、LLM `reason`、token 用量和错误信息。
+
 `search_memory` 会把粗召回、本地加权和 LLM 精排写入 `retrieval_trace`。`load_memory` 成功后会更新该 memory 的 `usage_count` 和 `last_used_at`，后续检索会略微提升常用 memory。
 
 ## 多层 Context
