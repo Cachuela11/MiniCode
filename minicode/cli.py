@@ -192,6 +192,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Auto dreaming trigger after this many new active memories.",
     )
     parser.add_argument(
+        "--dream-session-token-threshold",
+        type=int,
+        default=int(os.getenv("MINICODE_DREAM_SESSION_TOKEN_THRESHOLD", "12000")),
+        help="Auto dreaming trigger after eligible raw sessions exceed this estimated token count.",
+    )
+    parser.add_argument(
         "--dream-interval-hours",
         type=int,
         default=int(os.getenv("MINICODE_DREAM_INTERVAL_HOURS", "24")),
@@ -234,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
             config=DreamingConfig(
                 mode=args.dreaming,
                 session_threshold=args.dream_session_threshold,
+                session_token_threshold=args.dream_session_token_threshold,
                 memory_threshold=args.dream_memory_threshold,
                 interval_hours=args.dream_interval_hours,
                 max_batch_size=args.dream_max_batch_size,
@@ -299,6 +306,7 @@ def main(argv: list[str] | None = None) -> int:
             memory_max_candidates=args.memory_max_candidates,
             dreaming_mode=args.dreaming,
             dreaming_session_threshold=args.dream_session_threshold,
+            dreaming_session_token_threshold=args.dream_session_token_threshold,
             dreaming_memory_threshold=args.dream_memory_threshold,
             dreaming_interval_hours=args.dream_interval_hours,
             dreaming_max_batch_size=args.dream_max_batch_size,

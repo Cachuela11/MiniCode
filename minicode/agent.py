@@ -70,6 +70,7 @@ class AgentConfig:
     memory_max_candidates: int = 5
     dreaming_mode: str = "auto"
     dreaming_session_threshold: int = 8
+    dreaming_session_token_threshold: int = 12000
     dreaming_memory_threshold: int = 40
     dreaming_interval_hours: int = 24
     dreaming_max_batch_size: int = 20
@@ -271,6 +272,7 @@ class CodingAgent:
             config=DreamingConfig(
                 mode=self.config.dreaming_mode,
                 session_threshold=self.config.dreaming_session_threshold,
+                session_token_threshold=self.config.dreaming_session_token_threshold,
                 memory_threshold=self.config.dreaming_memory_threshold,
                 interval_hours=self.config.dreaming_interval_hours,
                 max_batch_size=self.config.dreaming_max_batch_size,

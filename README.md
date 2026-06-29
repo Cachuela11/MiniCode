@@ -293,7 +293,7 @@ flowchart TD
 第一版 dreaming：
 
 - 触发方式：手动 `python -m minicode --dream` 强制执行；自动模式下在 run 结束后检查阈值。
-- 自动触发规则：发现可处理范围内的精确重复 memory；超过热窗口的原始 `session_memory` 数量达到 `MINICODE_DREAM_SESSION_THRESHOLD`；新增 active memory 数量达到 `MINICODE_DREAM_MEMORY_THRESHOLD`；已有上次 dreaming 记录且超过 `MINICODE_DREAM_INTERVAL_HOURS`，同时存在超过热窗口的原始 session。
+- 自动触发规则：发现可处理范围内的精确重复 memory；超过热窗口的原始 `session_memory` 数量达到 `MINICODE_DREAM_SESSION_THRESHOLD`；超过热窗口的原始 `session_memory` 估算 token 量达到 `MINICODE_DREAM_SESSION_TOKEN_THRESHOLD`；新增 active memory 数量达到 `MINICODE_DREAM_MEMORY_THRESHOLD`；已有上次 dreaming 记录且超过 `MINICODE_DREAM_INTERVAL_HOURS`，同时存在超过热窗口的原始 session。
 - 热窗口规则：默认近 `2` 天的原始 `session_memory` 不参与 dreaming、不去重、不归档，继续完整参与检索。
 - 处理内容：先本地归档可处理范围内的精确重复 memory；再把超过热窗口的原始 session 和部分长期记忆交给 DeepSeek 做合并、摘要和长期记忆候选生成。
 - 写入策略：dreaming 可以写入两类候选：`session_memory/subtype=session_summary` 作为 session 层压缩摘要；`project_memory`、`procedural_memory`、`experience_memory` 作为单独判断后的长期记忆。
@@ -411,6 +411,7 @@ flowchart TD
 - `MINICODE_MEMORY_MAX_CANDIDATES`：每次反思最多生成的候选记忆数，默认 `5`
 - `MINICODE_DREAMING`：run 结束后的 dreaming 模式，`off` / `auto`，默认 `auto`
 - `MINICODE_DREAM_SESSION_THRESHOLD`：新增多少条 `session_memory` 后自动触发 dreaming，默认 `8`
+- `MINICODE_DREAM_SESSION_TOKEN_THRESHOLD`：超过热窗口的原始 session memory 估算 token 总量达到多少后触发，默认 `12000`
 - `MINICODE_DREAM_MEMORY_THRESHOLD`：新增多少条 active memory 后自动触发 dreaming，默认 `40`
 - `MINICODE_DREAM_INTERVAL_HOURS`：距离上次 dreaming 超过多少小时且存在新 session 时触发，默认 `24`
 - `MINICODE_DREAM_MAX_BATCH_SIZE`：单次 dreaming 最多处理多少条 memory，默认 `20`

@@ -21,6 +21,7 @@ SESSION_SUMMARY_SUBTYPE = "session_summary"
 class DreamingConfig:
     mode: str = "auto"
     session_threshold: int = 8
+    session_token_threshold: int = 12000
     memory_threshold: int = 40
     interval_hours: int = 24
     max_batch_size: int = 20
@@ -94,6 +95,7 @@ class MemoryDreamer:
             for item in raw_session_items
             if item.memory_id not in processed_session_ids and _is_older_than_days(item, self.config.session_hot_days)
         ]
+        eligible_session_tokens = sum(_estimate_memory_tokens(item) for item in eligible_sessions)
         new_memory_ids = [item.memory_id for item in items if item.memory_id not in processed_memory_ids]
         duplicate_groups = _exact_duplicate_groups(_dedup_eligible_items(items, self.config.session_hot_days))
         hours_since_last = _hours_since(state.get("last_dream_at"))
@@ -103,10 +105,12 @@ class MemoryDreamer:
             "session_memory_count": sum(1 for item in items if item.memory_type == "session_memory"),
             "raw_session_memory_count": len(raw_session_items),
             "eligible_session_count": len(eligible_sessions),
+            "eligible_session_estimated_tokens": eligible_session_tokens,
             "new_memory_count": len(new_memory_ids),
             "exact_duplicate_group_count": len(duplicate_groups),
             "hours_since_last_dream": hours_since_last,
             "session_threshold": self.config.session_threshold,
+            "session_token_threshold": self.config.session_token_threshold,
             "memory_threshold": self.config.memory_threshold,
             "interval_hours": self.config.interval_hours,
             "session_hot_days": self.config.session_hot_days,
@@ -120,6 +124,8 @@ class MemoryDreamer:
             return DreamingDecision(True, "exact_duplicates_found", metrics)
         if len(eligible_sessions) >= max(1, self.config.session_threshold):
             return DreamingDecision(True, "eligible_session_threshold", metrics)
+        if eligible_session_tokens >= max(1, self.config.session_token_threshold):
+            return DreamingDecision(True, "eligible_session_token_threshold", metrics)
         if len(new_memory_ids) >= max(1, self.config.memory_threshold):
             return DreamingDecision(True, "new_memory_threshold", metrics)
         if state.get("last_dream_at") and eligible_sessions and hours_since_last >= max(1, self.config.interval_hours):
@@ -396,6 +402,13 @@ def _serialize_memory(item: MemoryItem) -> dict[str, Any]:
         "parent_memory_ids": item.parent_memory_ids[:12],
         "created_at": item.created_at,
     }
+
+
+def _estimate_memory_tokens(item: MemoryItem) -> int:
+    text = " ".join([item.title, item.body, " ".join(item.tags)])
+    ascii_chars = sum(1 for char in text if ord(char) < 128)
+    non_ascii_chars = len(text) - ascii_chars
+    return max(1, (ascii_chars + 3) // 4 + non_ascii_chars)
 
 
 def _exact_duplicate_groups(items: list[MemoryItem]) -> list[list[MemoryItem]]:
