@@ -290,7 +290,7 @@ flowchart TD
 - 原始 `session_memory` 当前检索分数乘以 `0.6`，`subtype=session_summary` 乘以 `0.75`，避免 session 层压过长期记忆。
 - `index.json` 是记忆目录和元数据索引，记录 `id`、`type`、`subtype`、`title`、`tags`、`path`、`source_run_id`、`source_trace_ids`、`parent_memory_ids`。当前检索仍直接扫描 active Markdown/Text 文件，`index.json` 主要服务人工查看、后续 context memory index 和 dreaming 批处理。
 
-**第一版 Dreaming**
+## Dreaming
 
 **四种触发时机**
 
@@ -301,7 +301,7 @@ flowchart TD
 
 `session_memory` 层只处理超过热窗口的原始 session，数量阈值使用 `MINICODE_DREAM_SESSION_THRESHOLD`，token 阈值使用 `MINICODE_DREAM_SESSION_TOKEN_THRESHOLD`。`project_memory`、`procedural_memory`、`experience_memory` 层使用 `MINICODE_DREAM_MEMORY_THRESHOLD` 和 `MINICODE_DREAM_MEMORY_TOKEN_THRESHOLD`。
 
-**四层 Dreaming 总流转**
+**四层 Dreaming 流转**
 
 ```mermaid
 flowchart TD
@@ -336,26 +336,6 @@ flowchart TD
     S -->|yes| L
     S -->|no| T[Update index.json and dreaming-state.json]
     T --> U[Write run_log.memory_dreaming]
-```
-
-**单层 Dreaming 输出逻辑**
-
-```mermaid
-flowchart LR
-    A[Current layer batch] --> B[DeepSeek]
-    B --> C[Same-layer candidate]
-    B --> D[Promotion candidate]
-
-    C --> E{Valid and confident?}
-    E -->|yes| F[Write current layer memory]
-    E -->|no| G[Skip]
-
-    D --> H{Should promote?}
-    H -->|yes| I[Write next layer memory]
-    H -->|no| J[Skip promotion]
-
-    F --> K[Archive only superseded current-layer sources]
-    I --> L[Keep sources traceable via parent_memory_ids]
 ```
 
 - 触发方式：手动 `python -m minicode --dream` 强制执行；自动模式下在 run 结束后检查阈值。
