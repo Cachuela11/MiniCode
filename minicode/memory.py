@@ -43,8 +43,6 @@ class MemoryItem:
     importance: float = 0.5
     usage_count: int = 0
     last_used_at: str = ""
-    source_quality: float = 0.8
-    superseded_by: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -63,8 +61,6 @@ class MemoryCandidate:
     tags: list[str] = field(default_factory=list)
     confidence: float = 0.0
     importance: float = 0.5
-    source_quality: float = 0.8
-    superseded_by: list[str] = field(default_factory=list)
     source_run: str = ""
     source_run_id: str = ""
     source_trace_ids: list[str] = field(default_factory=list)
@@ -147,8 +143,6 @@ class FileMemoryStore:
             "importance": f"{_clamp_confidence(candidate.importance):.2f}",
             "usage_count": "0",
             "last_used_at": "",
-            "source_quality": f"{_clamp_confidence(candidate.source_quality):.2f}",
-            "superseded_by": _clean_list(candidate.superseded_by, limit=32),
             "source_run": candidate.source_run,
             "source_run_id": candidate.source_run_id,
             "source_trace_ids": _clean_list(candidate.source_trace_ids, limit=32),
@@ -242,8 +236,6 @@ class FileMemoryStore:
                     "importance": item.importance,
                     "usage_count": item.usage_count,
                     "last_used_at": item.last_used_at,
-                    "source_quality": item.source_quality,
-                    "superseded_by": item.superseded_by,
                 }
                 for item in items
             ],
@@ -302,7 +294,6 @@ def _load_memory_item(path: Path, root: Path) -> MemoryItem:
     importance = _as_float(metadata.get("importance"), default=0.5)
     usage_count = _as_int(metadata.get("usage_count"), default=0)
     last_used_at = str(metadata.get("last_used_at") or "")
-    source_quality = _as_float(metadata.get("source_quality"), default=0.8)
     return MemoryItem(
         memory_id=memory_id,
         title=title,
@@ -324,8 +315,6 @@ def _load_memory_item(path: Path, root: Path) -> MemoryItem:
         importance=importance,
         usage_count=usage_count,
         last_used_at=last_used_at,
-        source_quality=source_quality,
-        superseded_by=_as_list(metadata.get("superseded_by")),
     )
 
 

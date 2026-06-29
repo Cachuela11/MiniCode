@@ -461,14 +461,14 @@ def _dreaming_prompt(layer: str, next_layer: str | None, max_candidates: int) ->
         "Do not save secrets, API keys, raw credentials, or one-off trivia. "
         "Prefer fewer, clearer memories over many small fragments. "
         "Use source_memory_ids to cite the memories that support each candidate. "
-        "Only include archive_memory_ids for current-layer memories that are fully superseded by a same-layer candidate; "
+        "Only include archive_memory_ids for current-layer memories that are fully covered by a same-layer candidate; "
         "do not archive source memories merely because a promotion candidate was written. "
         "Schema: "
         '{"candidates":[{"type":"session_memory|project_memory|procedural_memory|experience_memory",'
         '"subtype":"session_summary for session_memory, otherwise empty",'
         '"title":"short title","summary":"consolidated memory","tags":["tag"],'
         '"confidence":0.0,"source_memory_ids":["memory-id"],"evidence":["short evidence"],"sensitive":false}],'
-        '"archive_memory_ids":["superseded-long-term-memory-id"]}. '
+        '"archive_memory_ids":["covered-long-term-memory-id"]}. '
         f"Return at most {max_candidates} candidates."
     )
 

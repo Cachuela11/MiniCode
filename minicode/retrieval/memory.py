@@ -58,7 +58,6 @@ class MemoryToolRetriever:
         coarse_limit = max(limit, self.coarse_limit)
         coarse_results = self.store.search(query, limit=coarse_limit)
         weighted_results = [_weight_result(query, result) for result in coarse_results]
-        weighted_results = _apply_redundancy_penalty(weighted_results)
         weighted_results = sorted(weighted_results, key=lambda item: (-item.final_score, item.result.item.memory_id))
 
         llm_error = ""
@@ -117,7 +116,7 @@ class MemoryToolRetriever:
                 ),
                 RetrievalStage(
                     name="weighted_rerank",
-                    strategy="memory_type_confidence_importance_recency_usage_intent_redundancy",
+                    strategy="memory_type_confidence_importance_recency_usage_intent",
                     input_count=len(coarse_results),
                     output_count=len(rerank_candidates),
                     metadata={
@@ -159,8 +158,6 @@ def _to_retrieval_result(result: MemorySearchResult, weighted: WeightedMemoryRes
         "importance": item.importance,
         "usage_count": item.usage_count,
         "last_used_at": item.last_used_at,
-        "source_quality": item.source_quality,
-        "superseded_by": item.superseded_by,
     }
     result_metadata = {}
     if weighted is not None:
@@ -192,10 +189,7 @@ def _weight_result(query: str, result: MemorySearchResult) -> WeightedMemoryResu
         "importance": 0.7 + 0.3 * _clamp(item.importance),
         "recency": _recency_weight(item),
         "usage": 1.0 + min(math.log1p(item.usage_count) * 0.08, 0.3),
-        "source_quality": 0.6 + 0.4 * _clamp(item.source_quality),
-        "superseded": 0.1 if item.superseded_by else 1.0,
         "intent": _intent_weight(query, item),
-        "redundancy": 1.0,
     }
     final_score = float(result.score)
     for weight in weights.values():
@@ -209,34 +203,6 @@ def _weight_result(query: str, result: MemorySearchResult) -> WeightedMemoryResu
         weights=weights,
         reasons=reasons,
     )
-
-
-def _apply_redundancy_penalty(results: list[WeightedMemoryResult]) -> list[WeightedMemoryResult]:
-    seen: set[str] = set()
-    updated: list[WeightedMemoryResult] = []
-    for result in sorted(results, key=lambda item: (-item.final_score, item.result.item.memory_id)):
-        key = _source_key(result.result.item)
-        if key in seen:
-            weights = dict(result.weights)
-            weights["redundancy"] = 0.75
-            final_score = result.base_score
-            for weight in weights.values():
-                final_score *= weight
-            reasons = [reason for reason in result.reasons if not reason.startswith("weight:redundancy:")]
-            reasons.append("weight:redundancy:0.75")
-            updated.append(
-                WeightedMemoryResult(
-                    result=result.result,
-                    base_score=result.base_score,
-                    final_score=final_score,
-                    weights=weights,
-                    reasons=reasons,
-                )
-            )
-        else:
-            seen.add(key)
-            updated.append(result)
-    return updated
 
 
 def _llm_rerank(
@@ -333,14 +299,6 @@ def _intent_weight(query: str, item: MemoryItem) -> float:
     if item.memory_type == "session_memory" and _contains_any(text, ["刚才", "最近", "上次", "session", "recent"]):
         return 1.20
     return 1.0
-
-
-def _source_key(item: MemoryItem) -> str:
-    if item.parent_memory_ids:
-        return "parent:" + item.parent_memory_ids[0]
-    if item.source_run_id:
-        return "run:" + item.source_run_id
-    return "memory:" + item.memory_id
 
 
 def _age_days(value: str) -> float:
