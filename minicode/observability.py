@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -57,6 +58,7 @@ class RunLog:
     task: str
     model: str
     started_at: str
+    run_id: str = ""
     duration_ms: int = 0
     answer: str = ""
     skill_route: dict[str, Any] | None = None
@@ -104,6 +106,12 @@ def summarize_messages(messages: list[dict[str, str]], limit: int = 800) -> str:
     if len(summary) <= limit:
         return summary
     return summary[: limit - 3] + "..."
+
+
+def make_run_id(started_at: str, task: str) -> str:
+    timestamp = re.sub(r"[^0-9]", "", started_at)[:14] or "00000000000000"
+    digest = hashlib.sha256(f"{started_at}|{task}".encode("utf-8")).hexdigest()[:10]
+    return f"run_{timestamp}_{digest}"
 
 
 def _scan_files(root: Path) -> dict[str, str]:

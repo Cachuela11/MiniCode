@@ -9,7 +9,16 @@ from .context import ContextConfig, ContextManager, build_initial_context, rende
 from .evolution import SelfEvolution
 from .llm import LLMResponse
 from .memory import FileMemoryStore
-from .observability import FileSnapshot, RunLog, StepLog, TestResult, Timer, TokenUsage, summarize_messages
+from .observability import (
+    FileSnapshot,
+    RunLog,
+    StepLog,
+    TestResult,
+    Timer,
+    TokenUsage,
+    make_run_id,
+    summarize_messages,
+)
 from .sandbox import DockerSandbox
 from .skills import SkillCatalog, SkillRoute, TwoStageSkillRouter, render_skill_prompt
 from .tools import ToolRegistry
@@ -99,10 +108,12 @@ class CodingAgent:
     def run(self, task: str) -> AgentResult:
         run_timer = Timer()
         file_snapshot = FileSnapshot(self.sandbox.workspace)
+        started_at = datetime.now(timezone.utc).isoformat()
         run_log = RunLog(
             task=task,
             model=self.config.model,
-            started_at=datetime.now(timezone.utc).isoformat(),
+            started_at=started_at,
+            run_id=make_run_id(started_at, task),
         )
         skill_route = self._route_skills(task)
         run_log.skill_route = skill_route.to_log_dict()

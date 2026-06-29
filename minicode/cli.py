@@ -290,7 +290,12 @@ def _resolve_run_log_path(target: Path, payload: dict) -> Path:
 
     task = str(payload.get("task") or "run")
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    filename = f"{timestamp}-{_slugify(task)}.json"
+    run_id = _slugify(str(payload.get("run_id") or ""), limit=40)
+    parts = [timestamp]
+    if run_id:
+        parts.append(run_id)
+    parts.append(_slugify(task))
+    filename = "-".join(parts) + ".json"
     return _avoid_overwrite(target / filename)
 
 

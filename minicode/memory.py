@@ -27,6 +27,13 @@ class MemoryItem:
     tags: list[str]
     source_path: str
     memory_type: str = "project_memory"
+    source_run: str = ""
+    source_run_id: str = ""
+    source_trace_ids: list[str] = field(default_factory=list)
+    source_step_ids: list[str] = field(default_factory=list)
+    source_tool_names: list[str] = field(default_factory=list)
+    source_modified_files: list[str] = field(default_factory=list)
+    parent_memory_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -44,6 +51,12 @@ class MemoryCandidate:
     tags: list[str] = field(default_factory=list)
     confidence: float = 0.0
     source_run: str = ""
+    source_run_id: str = ""
+    source_trace_ids: list[str] = field(default_factory=list)
+    source_step_ids: list[str] = field(default_factory=list)
+    source_tool_names: list[str] = field(default_factory=list)
+    source_modified_files: list[str] = field(default_factory=list)
+    parent_memory_ids: list[str] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)
 
 
@@ -105,6 +118,12 @@ class FileMemoryStore:
             "tags": [_slugify(tag, limit=32) for tag in candidate.tags if str(tag).strip()],
             "confidence": f"{_clamp_confidence(candidate.confidence):.2f}",
             "source_run": candidate.source_run,
+            "source_run_id": candidate.source_run_id,
+            "source_trace_ids": _clean_list(candidate.source_trace_ids, limit=32),
+            "source_step_ids": _clean_list(candidate.source_step_ids, limit=32),
+            "source_tool_names": _clean_list(candidate.source_tool_names, limit=32),
+            "source_modified_files": _clean_list(candidate.source_modified_files, limit=32),
+            "parent_memory_ids": _clean_list(candidate.parent_memory_ids, limit=32),
             "created_at": now,
             "updated_at": now,
             "evidence": [item.strip() for item in candidate.evidence if item.strip()][:5],
@@ -132,6 +151,10 @@ class FileMemoryStore:
                     "title": item.title,
                     "tags": item.tags,
                     "path": _relative_or_absolute(Path(item.source_path), self.workspace),
+                    "source_run": item.source_run,
+                    "source_run_id": item.source_run_id,
+                    "source_trace_ids": item.source_trace_ids,
+                    "parent_memory_ids": item.parent_memory_ids,
                 }
                 for item in items
             ],
@@ -171,6 +194,8 @@ def _load_memory_item(path: Path, root: Path) -> MemoryItem:
     memory_type = _normalize_memory_type(str(metadata.get("type") or _infer_type_from_path(path, root)))
     title = str(metadata.get("title") or _first_heading(body) or path.stem)
     tags = _as_list(metadata.get("tags"))
+    source_run = str(metadata.get("source_run") or "")
+    source_run_id = str(metadata.get("source_run_id") or source_run)
     return MemoryItem(
         memory_id=memory_id,
         title=title,
@@ -178,6 +203,13 @@ def _load_memory_item(path: Path, root: Path) -> MemoryItem:
         tags=tags,
         source_path=str(path),
         memory_type=memory_type,
+        source_run=source_run,
+        source_run_id=source_run_id,
+        source_trace_ids=_as_list(metadata.get("source_trace_ids")),
+        source_step_ids=_as_list(metadata.get("source_step_ids")),
+        source_tool_names=_as_list(metadata.get("source_tool_names")),
+        source_modified_files=_as_list(metadata.get("source_modified_files")),
+        parent_memory_ids=_as_list(metadata.get("parent_memory_ids")),
     )
 
 
@@ -304,7 +336,8 @@ def _candidate_id(candidate: MemoryCandidate, timestamp: str) -> str:
         "experience_memory": "exp",
         "session_memory": "sess",
     }[memory_type]
-    digest_source = "|".join([candidate.title, candidate.body, candidate.source_run, timestamp])
+    source_run = candidate.source_run_id or candidate.source_run
+    digest_source = "|".join([candidate.title, candidate.body, source_run, timestamp])
     digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:10]
     date = timestamp[:10].replace("-", "")
     return f"{prefix}_{date}_{digest}"
@@ -352,6 +385,10 @@ def _clamp_confidence(value: float) -> float:
     except (TypeError, ValueError):
         parsed = 0.0
     return max(0.0, min(1.0, parsed))
+
+
+def _clean_list(values: list[str], limit: int) -> list[str]:
+    return [str(value).strip() for value in values if str(value).strip()][:limit]
 
 
 def _relative_or_absolute(path: Path, root: Path) -> str:

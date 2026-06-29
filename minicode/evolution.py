@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
 
 from .memory import FileMemoryStore, MemoryCandidate, MemoryWriteResult
@@ -72,7 +72,8 @@ class SelfEvolution:
         result = MemoryEvolutionResult(mode=self.mode, status="started")
         session_candidate = _session_candidate(run_log)
         try:
-            result.written.append(self.memory_store.write_candidate(session_candidate))
+            session_write = self.memory_store.write_candidate(session_candidate)
+            result.written.append(session_write)
         except Exception as exc:
             result.status = "error"
             result.error = f"session memory write failed: {exc}"
@@ -94,6 +95,10 @@ class SelfEvolution:
             result.skipped.extend(skipped)
 
             for candidate in candidates:
+                candidate = replace(
+                    candidate,
+                    parent_memory_ids=_unique([*candidate.parent_memory_ids, session_write.memory_id]),
+                )
                 if candidate.confidence < self.min_confidence:
                     result.skipped.append(
                         {
@@ -262,6 +267,11 @@ class LongTermMemoryJudge:
                             "summary": session_candidate.body,
                             "tags": session_candidate.tags,
                             "source_run": session_candidate.source_run,
+                            "source_run_id": session_candidate.source_run_id,
+                            "source_trace_ids": session_candidate.source_trace_ids,
+                            "source_step_ids": session_candidate.source_step_ids,
+                            "source_tool_names": session_candidate.source_tool_names,
+                            "source_modified_files": session_candidate.source_modified_files,
                         },
                         "regex_signals": [asdict(signal) for signal in signals],
                     },
@@ -302,6 +312,11 @@ class LongTermMemoryJudge:
                     tags=_as_string_list(raw.get("tags"))[:8],
                     confidence=_as_float(raw.get("confidence")),
                     source_run=session_candidate.source_run,
+                    source_run_id=session_candidate.source_run_id,
+                    source_trace_ids=session_candidate.source_trace_ids,
+                    source_step_ids=session_candidate.source_step_ids,
+                    source_tool_names=session_candidate.source_tool_names,
+                    source_modified_files=session_candidate.source_modified_files,
                     evidence=_as_string_list(raw.get("evidence"))[:5],
                 )
             )
@@ -330,6 +345,10 @@ def _session_candidate(run_log: RunLog) -> MemoryCandidate:
     summary = _run_summary(run_log)
     modified_files = summary["modified_files"]
     tool_names = [step["tool"] for step in summary["steps"] if step["tool"] != "finish"]
+    source_run_id = _source_run_id(run_log)
+    source_step_ids = [str(step["step"]) for step in summary["steps"]]
+    source_trace_ids = [source_run_id]
+    source_trace_ids.extend(f"{source_run_id}:step:{step_id}" for step_id in source_step_ids)
     final_test = summary["final_test"]
     invalid_commands = sum(1 for step in summary["steps"] if step["invalid_command"])
     dangerous_commands = sum(1 for step in summary["steps"] if step["dangerous_command"])
@@ -351,7 +370,12 @@ def _session_candidate(run_log: RunLog) -> MemoryCandidate:
         body="\n".join(rows),
         tags=_session_tags(tool_names, modified_files),
         confidence=1.0,
-        source_run=_source_run_id(run_log),
+        source_run=source_run_id,
+        source_run_id=source_run_id,
+        source_trace_ids=source_trace_ids,
+        source_step_ids=source_step_ids,
+        source_tool_names=_unique(tool_names),
+        source_modified_files=modified_files,
         evidence=["local session summary generated after run completion"],
     )
 
@@ -458,6 +482,8 @@ def _parse_json_object(text: str) -> dict[str, Any]:
 
 
 def _source_run_id(run_log: RunLog) -> str:
+    if run_log.run_id:
+        return run_log.run_id
     slug = re.sub(r"[^0-9A-Za-z._-]+", "-", run_log.task).strip("-._")[:40] or "run"
     return f"{run_log.started_at}-{slug}"
 

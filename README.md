@@ -225,8 +225,8 @@ flowchart TB
 
 ```mermaid
 flowchart TD
-    A[Agent run finished] --> B[Build session summary]
-    B --> C[Write session_memory]
+    A[Agent run finished] --> B[Build session summary<br/>and source trace]
+    B --> C[Write session_memory<br/>with trace metadata]
     C --> D[Regex prefilter on session summary]
     D --> E{Hit long-term signals?}
     E -->|no| F[Stop after session memory]
@@ -242,10 +242,10 @@ flowchart TD
 
 四类记忆：
 
+- `session_memory`：每次 run 的情景摘要，记录任务、结果、关键文件、工具使用和测试状态。
 - `project_memory`：项目事实、架构约定、文件组织、设计决策。
 - `procedural_memory`：可复用的修复流程、测试流程、工具使用经验。
 - `experience_memory`：明确表达过的协作经验和稳定工作偏好。
-- `session_memory`：每次 run 的情景摘要，记录任务、结果、关键文件、工具使用和测试状态。
 
 当前执行逻辑：
 
@@ -258,6 +258,8 @@ flowchart TD
 - DeepSeek 不再负责生成 `session_memory`，`session_memory` 始终由本地摘要生成。
 - 如果 DeepSeek 长期分类失败，已经写入的 `session_memory` 会保留，不会让主任务失败。
 - 记忆写入结果会记录到 run log 的 `memory_evolution` 字段。
+- 每条新 memory 会写入 `source_run_id`、`source_trace_ids`、`source_step_ids`、`source_tool_names`、`source_modified_files` 等来源字段。
+- 长期记忆会通过 `parent_memory_ids` 指向它来自哪条 `session_memory`，方便后续 dreaming 回查证据链。
 
 存储结构：
 
@@ -277,7 +279,7 @@ flowchart TD
 - 四类记忆都直接写入对应目录，并参与 `search_memory`。
 - `session_memory` 始终写入 `sessions/` 目录，并参与 `search_memory`。
 - `session_memory` 当前检索分数乘以 `0.6`，作为情景记忆降权，避免压过长期记忆。
-- `index.json` 是记忆目录和元数据索引，记录 `id`、`type`、`title`、`tags`、`path`。当前检索仍直接扫描 Markdown/Text 文件，`index.json` 主要服务人工查看、后续 context memory index 和 dreaming 批处理。
+- `index.json` 是记忆目录和元数据索引，记录 `id`、`type`、`title`、`tags`、`path`、`source_run_id`、`source_trace_ids`、`parent_memory_ids`。当前检索仍直接扫描 Markdown/Text 文件，`index.json` 主要服务人工查看、后续 context memory index 和 dreaming 批处理。
 
 后续 dreaming 记忆演进会区分四类记忆处理：`session_memory` 负责批量复盘和升级，`project_memory` 负责项目事实合并与冲突消解，`procedural_memory` 负责流程抽象和 skill 候选生成，`experience_memory` 负责稳定协作经验的合并、去重和更新。
 
