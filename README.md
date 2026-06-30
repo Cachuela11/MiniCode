@@ -23,6 +23,7 @@ $env:DEEPSEEK_API_KEY = "sk-..."
 python -m pip install -e .
 python -m minicode --check
 python -m minicode "inspect the workspace and create a hello.txt file"
+python -m minicode --chat
 ```
 
 安装为 editable package 后，也可以直接运行：
@@ -31,7 +32,18 @@ python -m minicode "inspect the workspace and create a hello.txt file"
 minicode "inspect the workspace and create a hello.txt file"
 ```
 
+持续对话模式：
+
+```powershell
+python -m minicode --chat
+python -m minicode --chat "先看一下项目结构"
+```
+
+`--chat` 会启动一个持续 session。每次输入都会触发一轮 agent loop，但 messages、context artifacts、structured notes 和文件修改快照会保留到下一轮。输入 `/exit`、`/quit` 或 Ctrl+Z 后退出，退出时写一份 session run log，并在 session 结束时统一做 memory sedimentation / dreaming。
+
 ## Agent Loop
+
+单任务模式：
 
 ```mermaid
 flowchart TD
@@ -45,6 +57,22 @@ flowchart TD
     D -->|finished| H[Run final test]
     H --> I[Write run log and print answer]
     D -->|max steps| I
+```
+
+持续对话模式：
+
+```mermaid
+flowchart TD
+    A[python -m minicode --chat] --> B[Create CodingSession]
+    B --> C[Load initial workspace context]
+    C --> D[Wait for user input]
+    D --> E[Route skills for this turn]
+    E --> F[Run agent loop for current turn]
+    F --> G[Append answer/action/observations to session messages]
+    G --> H{User exits?}
+    H -->|no| D
+    H -->|yes| I[Finalize one session run log]
+    I --> J[Run memory sedimentation and dreaming once]
 ```
 
 ```mermaid
@@ -67,9 +95,11 @@ flowchart TD
     L --> Z
 ```
 
-第一张图是 agent 主循环：用户任务进入后，MiniCode 构建 prompt，DeepSeek 返回一个 JSON action，系统执行对应 tool，并把 observation 再发回模型，直到模型返回 `finish` 或达到最大步数。
+第一张图是单任务 agent 主循环：用户任务进入后，MiniCode 构建 prompt，DeepSeek 返回一个 JSON action，系统执行对应 tool，并把 observation 再发回模型，直到模型返回 `finish` 或达到最大步数。
 
-第二张图是 tool 执行路径：不是所有 tool 都走 Docker。文件类 tool 直接在本地 workspace 内执行路径校验和读写；`run_shell` / `run_tests` 才会进入 Docker sandbox；未来 API 类 tool 会走自己的 API 参数校验和权限策略。
+第二张图是持续对话 session：外层 session loop 接收多次用户输入，每次输入内部仍然跑一段 agent loop；同一个 session 保留上下文，退出时统一写 session run log 和 memory。
+
+第三张图是 tool 执行路径：不是所有 tool 都走 Docker。文件类 tool 直接在本地 workspace 内执行路径校验和读写；`run_shell` / `run_tests` 才会进入 Docker sandbox；未来 API 类 tool 会走自己的 API 参数校验和权限策略。
 
 ## 项目文件架构
 
@@ -121,8 +151,8 @@ MiniCode/
 - `.skills/`：Skill 内容库。这里的 Markdown 文件是给模型看的任务工作流说明，不是 Python 执行代码。
 - `.gitignore`：忽略 `.minicode/`、Python 缓存和安装元数据。`.minicode/` 是本机持久运行数据目录，但默认不提交到 Git。
 - `minicode/__main__.py`：支持 `python -m minicode` 的入口文件，只负责转发到 CLI。
-- `minicode/cli.py`：命令行入口，解析参数，创建 `DeepSeekClient`、`DockerSandbox`、`CodingAgent`，并处理 `--check`、`--eval`、`--run-log` 等模式。
-- `minicode/agent.py`：agent 主循环。它负责构建 prompt、调用模型、解析 JSON action、执行 tool、记录 step log，并在结束时运行可选 final test。
+- `minicode/cli.py`：命令行入口，解析参数，创建 `DeepSeekClient`、`DockerSandbox`、`CodingAgent`，并处理 `--check`、`--eval`、`--chat`、`--run-log` 等模式。
+- `minicode/agent.py`：agent 主循环和持续对话 session。`CodingAgent.run()` 负责单任务执行；`CodingSession` 负责多轮用户输入共享同一份 messages/context，并在 session 关闭时统一 finalize。
 - `minicode/llm.py`：DeepSeek API client。调用 OpenAI-compatible `/chat/completions`，返回模型内容、token 用量和耗时。
 - `minicode/tools.py`：Tool runtime。注册并执行当前支持的 tools，统一返回 `ToolResult`。
 - `minicode/sandbox.py`：Docker sandbox。负责把命令放进 Docker 的 `/workspace` 中执行，并收集 stdout、stderr、exit code、耗时和权限信息。

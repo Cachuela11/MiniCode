@@ -22,6 +22,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("task", nargs="*", help="Coding task for the agent.")
     parser.add_argument("--check", action="store_true", help="Run environment checks and exit.")
     parser.add_argument(
+        "--chat",
+        action="store_true",
+        help="Start an interactive multi-turn coding session.",
+    )
+    parser.add_argument(
         "--dream",
         action="store_true",
         help="Run one forced memory dreaming pass and exit.",
@@ -288,10 +293,39 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Eval report written to {args.eval_output}")
         return 0
 
-    if not args.task:
-        parser.error("task is required unless --check or --eval is used")
+    if not args.task and not args.chat:
+        parser.error("task is required unless --check, --eval, --dream, or --chat is used")
 
-    agent = CodingAgent(
+    agent = _build_agent(args=args, llm=llm, sandbox=sandbox, skill_catalog=skill_catalog)
+
+    if args.chat:
+        return _run_chat(agent=agent, args=args)
+
+    try:
+        result = agent.run(" ".join(args.task))
+    except KeyboardInterrupt:
+        print("Interrupted while waiting for the agent. No run log was written for this run.")
+        return 130
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+    print(result.answer)
+
+    if args.transcript:
+        transcript_path = Path(args.transcript)
+        transcript_path.write_text(
+            json.dumps(result.transcript, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    if args.run_log and result.run_log:
+        run_log_path = _write_run_log(Path(args.run_log), result.run_log.to_dict())
+        print(f"Run log written to {run_log_path}")
+
+    return 0
+
+
+def _build_agent(args, llm, sandbox: DockerSandbox, skill_catalog: SkillCatalog) -> CodingAgent:
+    return CodingAgent(
         llm=llm,
         sandbox=sandbox,
         config=AgentConfig(
@@ -324,27 +358,49 @@ def main(argv: list[str] | None = None) -> int:
         skill_catalog=skill_catalog,
     )
 
+
+def _run_chat(agent: CodingAgent, args) -> int:
+    session = agent.start_session()
+    initial_task = " ".join(args.task).strip()
+    print("MiniCode chat session started. Type /exit, /quit, or Ctrl+Z then Enter to stop.")
     try:
-        result = agent.run(" ".join(args.task))
-    except KeyboardInterrupt:
-        print("Interrupted while waiting for the agent. No run log was written for this run.")
-        return 130
+        if initial_task:
+            _run_chat_turn(session, initial_task)
+        while True:
+            try:
+                user_message = input("minicode> ").strip()
+            except EOFError:
+                print()
+                break
+            except KeyboardInterrupt:
+                print("\nInterrupted. Closing chat session.")
+                break
+            if not user_message:
+                continue
+            if user_message.lower() in {"/exit", "/quit", "exit", "quit"}:
+                break
+            _run_chat_turn(session, user_message)
+    finally:
+        run_log = session.close()
+        if args.transcript:
+            transcript_path = Path(args.transcript)
+            transcript_path.write_text(
+                json.dumps(session.transcript, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        if args.run_log and run_log:
+            run_log_path = _write_run_log(Path(args.run_log), run_log.to_dict())
+            print(f"Session run log written to {run_log_path}")
+    return 0
+
+
+def _run_chat_turn(session, user_message: str) -> None:
+    try:
+        result = session.run_turn(user_message)
     except RuntimeError as exc:
         print(f"ERROR: {exc}")
-        return 1
+        return
     print(result.answer)
-
-    if args.transcript:
-        transcript_path = Path(args.transcript)
-        transcript_path.write_text(
-            json.dumps(result.transcript, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-    if args.run_log and result.run_log:
-        run_log_path = _write_run_log(Path(args.run_log), result.run_log.to_dict())
-        print(f"Run log written to {run_log_path}")
-
-    return 0
 
 
 def _build_approval_provider(mode: str):
