@@ -44,16 +44,30 @@ python -m minicode --chat "先看一下项目结构"
 
 当前交互式前端支持：
 
-- `/help`：显示可用命令。
-- `/status`：显示当前 model、workspace、run id、turn 数、step 数、messages、artifacts、notes、token 等状态。
-- `/exit` / `/quit`：保存并退出 session。
-- 输入历史：优先使用 `prompt_toolkit`，历史文件写入 `.minicode/chat-history.txt`；如果依赖不可用，会退回普通 `input()`。
-- 输出渲染：优先使用 `rich` 展示 banner、表格和 Markdown；如果依赖不可用，会退回普通文本输出。
-- 实时过程展示：`CodingSession.iter_turn()` 会输出 session event，前端会实时显示 skill route、model action、tool result、context compaction 和最终 answer。
-- 过程和结果分区：执行轨迹统一以 `trace` 前缀显示；最终回答单独显示在 `Answer` 区块里，避免 tool 过程和最终内容混在一起。
-- 等待状态：模型调用和 tool 执行期间会显示 spinner 与耗时，避免长时间等待时看起来像卡住。
-- 结构化 trace：按 step 展示 model action、tool 参数、tool result、stdout/stderr preview、耗时与 token 概览。
-- 流式模型响应：`--chat` 默认使用 DeepSeek streaming；如果网关不支持，会自动 fallback 到普通非流式请求。可用 `--no-stream` 关闭。
+- 基础命令：`/help`、`/status`、`/exit`、`/quit`。
+- 输入体验：优先使用 `prompt_toolkit` 保存历史到 `.minicode/chat-history.txt`，不可用时退回普通 `input()`。
+- 实时执行状态：`CodingSession.iter_turn()` 输出事件流，UI 会显示 turn、skill route、step、model action、tool result 和 context compaction。
+- 等待反馈：模型调用和 tool 执行期间显示 spinner，并在完成后展示耗时。
+- 结构化 trace：按 `Turn` / `Step` 分块展示，区分 `model`、`tool`、`result`、`stdout/stderr preview`，不再把完整最终回答塞进 trace。
+- 结果分区：最终回答只显示在单独的 `Answer` 区块中。
+- 流式响应：`--chat` 默认使用 DeepSeek streaming；如果网关不支持会自动 fallback。可用 `--no-stream` 关闭。
+
+trace 示例：
+
+```text
+Turn 1
+  skills  none (none)
+
+Step 1
+  model   list_files  tokens=1057, 6037ms
+    args    {"limit": 200, "max_depth": 2, "path": "."}
+  tool    list_files
+  result  OK list_files  exit=0, 0ms
+    stdout  .env, .env.example, .gitignore, README.md, pyproject.toml, ...
+
+Step 2
+  model   finish  tokens=2011, 9086ms
+```
 
 ## Agent Loop
 
