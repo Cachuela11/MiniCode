@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict
 from typing import Any
 
@@ -19,6 +20,9 @@ except ImportError:  # pragma: no cover - exercised only without optional UI dep
 class CliRenderer:
     def __init__(self) -> None:
         self.console = Console() if Console is not None else None
+        self._status: Any | None = None
+        self._status_started_at: float | None = None
+        self._stream_chars = 0
 
     def banner(self, session: Any) -> None:
         lines = [
@@ -95,48 +99,73 @@ class CliRenderer:
 
     def event(self, event: Any) -> None:
         if event.kind == "turn_start":
-            self.trace(f"turn {event.turn} started")
+            self._stop_status()
+            self._section(f"Turn {event.turn}")
             return
         if event.kind == "skill_route":
             selected = event.data.get("selected") or []
             reranker = event.data.get("reranker") or "none"
             skills = ", ".join(selected) if selected else "none"
-            self.trace(f"skills: {skills} ({reranker})")
+            self._kv("skills", f"{skills} ({reranker})")
             return
         if event.kind == "context_compacted":
             after_chars = event.data.get("after_chars", "?")
             before_chars = event.data.get("before_chars", "?")
-            self.trace(f"context compacted: {before_chars} -> {after_chars} chars")
+            self._kv("context", f"compacted {before_chars} -> {after_chars} chars")
             return
         if event.kind == "model_start":
-            self.trace(f"model step {event.step}")
+            self._stream_chars = 0
+            self._section(f"Step {event.step}")
+            self._start_status(f"step {event.step}: waiting for model")
+            return
+        if event.kind == "model_delta":
+            self._stream_chars += len(event.data.get("delta") or event.message or "")
+            self._update_status(f"step {event.step}: streaming model output ({self._stream_chars} chars)")
+            return
+        if event.kind == "model_stream_fallback":
+            self._stop_status()
+            self._kv("stream", f"fallback: {_text_preview(event.message, limit=120)}")
+            self._start_status(f"step {event.step}: waiting for model")
             return
         if event.kind == "model_action":
+            elapsed = self._stop_status()
             action = event.data.get("action") or {}
             args = event.data.get("args") or {}
             action_name = action.get("action") or event.message
+            token_usage = event.data.get("token_usage") or {}
+            token_text = _format_token_usage(token_usage)
+            elapsed_text = f", {elapsed}ms" if elapsed is not None else ""
             if action_name == "finish":
-                answer = args.get("answer") or action.get("answer") or ""
-                preview = _text_preview(str(answer), limit=120)
-                suffix = f": {preview}" if preview else ""
-                self.trace(f"finish{suffix}")
+                self._row("model", "finish", f"{token_text}{elapsed_text}".strip(", "))
                 return
-            self._action(action_name, args)
+            self._action(event.step, action_name, args, token_text=token_text, elapsed_text=elapsed_text)
             return
         if event.kind == "tool_start":
+            tool_name = event.data.get("tool_name") or event.message
+            self._row("tool", str(tool_name), "")
+            self._start_status(f"step {event.step}: running {tool_name}")
             return
         if event.kind == "tool_result":
+            self._stop_status()
             self._tool_result(event)
             return
         if event.kind == "turn_finish":
+            self._stop_status()
             return
 
-    def _action(self, action_name: str, args: dict[str, Any]) -> None:
+    def _action(
+        self,
+        step: int | None,
+        action_name: str,
+        args: dict[str, Any],
+        *,
+        token_text: str = "",
+        elapsed_text: str = "",
+    ) -> None:
         preview = _json_preview(args)
-        if self.console:
-            self.console.print(f"[dim]trace[/dim] [cyan]*[/cyan] {action_name} [dim]{preview}[/dim]")
-            return
-        print(f"[trace] * {action_name} {preview}")
+        meta = f"{token_text}{elapsed_text}".strip(", ")
+        self._row("model", action_name, meta)
+        self._kv("args", preview, indent=4)
 
     def _tool_result(self, event: Any) -> None:
         data = event.data
@@ -144,26 +173,27 @@ class CliRenderer:
         exit_code = data.get("exit_code")
         ok = bool(data.get("ok"))
         modified = data.get("modified_files") or []
-        status = "ok" if ok else "failed"
-        details = [f"exit={exit_code}", status]
+        details = [f"exit={exit_code}"]
         if modified:
             details.append(f"modified={','.join(modified)}")
         if data.get("dangerous_command"):
             details.append("dangerous")
         if data.get("invalid_command"):
             details.append("invalid")
-        line = f"{tool_name}: " + ", ".join(details)
-        if self.console:
-            style = "green" if ok else "red"
-            marker = "OK" if ok else "FAIL"
-            self.console.print(f"[dim]trace[/dim] [{style}]{marker}[/{style}] {line}")
-        else:
-            print(f"[trace] {line}")
+        duration = data.get("duration_ms")
+        if duration is not None:
+            details.append(f"{duration}ms")
+        meta = ", ".join(details)
+        self._row("result", str(tool_name), meta, ok=ok)
+        stdout = data.get("stdout_preview")
+        if stdout:
+            self._kv("stdout", _output_preview(tool_name, str(stdout)), indent=4)
         stderr = data.get("stderr_preview")
         if stderr:
-            self.trace(f"stderr: {stderr}")
+            self._kv("stderr", _text_preview(str(stderr), limit=120), indent=4)
 
     def error(self, message: str) -> None:
+        self._stop_status()
         if self.console:
             self.console.print(f"[red]ERROR:[/red] {message}")
             return
@@ -177,12 +207,64 @@ class CliRenderer:
 
     def trace(self, message: str) -> None:
         if self.console:
-            self.console.print(f"[dim]trace[/dim] {message}")
+            self.console.print(f"[dim]{message}[/dim]")
             return
-        print(f"[trace] {message}")
+        print(message)
 
     def saved(self, path: Any, label: str = "Session run log") -> None:
         self.note(f"{label} written to {path}")
+
+    def _section(self, title: str) -> None:
+        if self.console:
+            self.console.print(f"\n[bold cyan]{title}[/bold cyan]")
+            return
+        print(f"\n{title}")
+
+    def _row(self, label: str, value: str, meta: str = "", ok: bool | None = None) -> None:
+        marker = ""
+        if ok is True:
+            marker = "OK "
+        elif ok is False:
+            marker = "FAIL "
+        line = f"  {label:<7} {marker}{value}"
+        if meta:
+            line += f"  ({meta})"
+        if self.console:
+            label_style = "green" if ok is True else "red" if ok is False else "cyan"
+            suffix = f" [dim]{meta}[/dim]" if meta else ""
+            self.console.print(f"  [{label_style}]{label:<7}[/{label_style}] {marker}{value}{suffix}")
+            return
+        print(line)
+
+    def _kv(self, key: str, value: str, indent: int = 2) -> None:
+        pad = " " * indent
+        line = f"{pad}{key:<7} {value}"
+        if self.console:
+            self.console.print(f"[dim]{pad}{key:<7}[/dim] {value}")
+            return
+        print(line)
+
+    def _start_status(self, message: str) -> None:
+        self._stop_status()
+        self._status_started_at = time.perf_counter()
+        if self.console is None:
+            return
+        self._status = self.console.status(message, spinner="dots")
+        self._status.start()
+
+    def _update_status(self, message: str) -> None:
+        if self._status is not None:
+            self._status.update(message)
+
+    def _stop_status(self) -> int | None:
+        elapsed = None
+        if self._status_started_at is not None:
+            elapsed = int((time.perf_counter() - self._status_started_at) * 1000)
+        if self._status is not None:
+            self._status.stop()
+            self._status = None
+        self._status_started_at = None
+        return elapsed
 
 
 def _json_preview(value: dict[str, Any], limit: int = 140) -> str:
@@ -197,3 +279,26 @@ def _text_preview(value: str, limit: int = 120) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 3] + "..."
+
+
+def _output_preview(tool_name: str, value: str) -> str:
+    text = value.strip()
+    if not text:
+        return "(empty)"
+    if tool_name == "list_files":
+        paths = [item for item in text.split() if item]
+        shown = ", ".join(paths[:5])
+        suffix = ", ..." if len(paths) > 5 or text.endswith("...") else ""
+        return f"{shown}{suffix}"
+    return _text_preview(text, limit=100)
+
+
+def _format_token_usage(value: dict[str, Any]) -> str:
+    total = value.get("total_tokens")
+    prompt = value.get("prompt_tokens")
+    completion = value.get("completion_tokens")
+    if total:
+        return f", tokens={total}"
+    if prompt or completion:
+        return f", tokens={prompt or 0}+{completion or 0}"
+    return ""

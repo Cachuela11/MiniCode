@@ -56,6 +56,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Maximum completion tokens for API providers.",
     )
     parser.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="Disable streaming model responses in --chat mode.",
+    )
+    parser.add_argument(
         "--workspace",
         default=os.getenv("MINICODE_WORKSPACE", "."),
         help="Host workspace path mounted into Docker.",
@@ -355,6 +360,7 @@ def _build_agent(args, llm, sandbox: DockerSandbox, skill_catalog: SkillCatalog)
             dreaming_max_batch_size=args.dream_max_batch_size,
             dreaming_min_confidence=args.dream_min_confidence,
             dreaming_session_hot_days=args.dream_session_hot_days,
+            stream_model_responses=not args.no_stream,
         ),
         skill_catalog=skill_catalog,
     )

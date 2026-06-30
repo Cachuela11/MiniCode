@@ -9,7 +9,7 @@ from typing import Any, Iterator, Protocol
 from .context import ContextConfig, ContextManager, build_initial_context, render_context_layer_prompt
 from .dreaming import DreamingConfig, MemoryDreamer
 from .evolution import SelfEvolution
-from .llm import LLMResponse
+from .llm import LLMResponse, LLMStreamDelta, LLMStreamDone
 from .memory import FileMemoryStore
 from .observability import (
     FileSnapshot,
@@ -86,6 +86,7 @@ class AgentConfig:
     dreaming_max_batch_size: int = 20
     dreaming_min_confidence: float = 0.75
     dreaming_session_hot_days: float = 2.0
+    stream_model_responses: bool = True
 
 
 @dataclass
@@ -619,7 +620,31 @@ class CodingSession:
             step_timer = Timer()
             model_input_summary = summarize_messages(self.messages)
             yield SessionEvent(kind="model_start", turn=turn, step=step, message="calling model")
-            llm_response = self.agent.llm.chat_response(model=self.agent.config.model, messages=self.messages)
+            llm_response = None
+            if self.agent.config.stream_model_responses:
+                stream_method = getattr(self.agent.llm, "chat_response_stream", None)
+                if callable(stream_method):
+                    try:
+                        for stream_event in stream_method(model=self.agent.config.model, messages=self.messages):
+                            if isinstance(stream_event, LLMStreamDelta):
+                                yield SessionEvent(
+                                    kind="model_delta",
+                                    turn=turn,
+                                    step=step,
+                                    message=stream_event.content,
+                                    data={"delta": stream_event.content},
+                                )
+                            elif isinstance(stream_event, LLMStreamDone):
+                                llm_response = stream_event.response
+                    except RuntimeError as exc:
+                        yield SessionEvent(
+                            kind="model_stream_fallback",
+                            turn=turn,
+                            step=step,
+                            message=str(exc),
+                        )
+            if llm_response is None:
+                llm_response = self.agent.llm.chat_response(model=self.agent.config.model, messages=self.messages)
             raw = llm_response.content
             action = _parse_action(raw)
             turn_transcript.append({"turn": turn, "step": step, "model": raw, "action": action})

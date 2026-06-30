@@ -51,6 +51,9 @@ python -m minicode --chat "先看一下项目结构"
 - 输出渲染：优先使用 `rich` 展示 banner、表格和 Markdown；如果依赖不可用，会退回普通文本输出。
 - 实时过程展示：`CodingSession.iter_turn()` 会输出 session event，前端会实时显示 skill route、model action、tool result、context compaction 和最终 answer。
 - 过程和结果分区：执行轨迹统一以 `trace` 前缀显示；最终回答单独显示在 `Answer` 区块里，避免 tool 过程和最终内容混在一起。
+- 等待状态：模型调用和 tool 执行期间会显示 spinner 与耗时，避免长时间等待时看起来像卡住。
+- 结构化 trace：按 step 展示 model action、tool 参数、tool result、stdout/stderr preview、耗时与 token 概览。
+- 流式模型响应：`--chat` 默认使用 DeepSeek streaming；如果网关不支持，会自动 fallback 到普通非流式请求。可用 `--no-stream` 关闭。
 
 ## Agent Loop
 
@@ -89,11 +92,12 @@ flowchart TD
     P -->|yes| Q[Inject mandatory first action<br/>model calls list_files]
     P -->|no| I[Run iter_turn event stream]
     Q --> I
-    I --> J[Render model action and tool result events]
-    J --> K[Render final answer]
-    K --> L[Append answer/action/observations to session messages]
-    L --> D
-    G --> M[Run memory sedimentation and dreaming once]
+    I --> J[Render spinner / model stream / step trace]
+    J --> K[Render model action and tool result events]
+    K --> L[Render final answer]
+    L --> M[Append answer/action/observations to session messages]
+    M --> D
+    G --> N[Run memory sedimentation and dreaming once]
 ```
 
 ```mermaid
