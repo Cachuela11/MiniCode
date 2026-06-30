@@ -49,6 +49,8 @@ python -m minicode --chat "先看一下项目结构"
 - `/exit` / `/quit`：保存并退出 session。
 - 输入历史：优先使用 `prompt_toolkit`，历史文件写入 `.minicode/chat-history.txt`；如果依赖不可用，会退回普通 `input()`。
 - 输出渲染：优先使用 `rich` 展示 banner、表格和 Markdown；如果依赖不可用，会退回普通文本输出。
+- 实时过程展示：`CodingSession.iter_turn()` 会输出 session event，前端会实时显示 skill route、model action、tool result、context compaction 和最终 answer。
+- 过程和结果分区：执行轨迹统一以 `trace` 前缀显示；最终回答单独显示在 `Answer` 区块里，避免 tool 过程和最终内容混在一起。
 
 ## Agent Loop
 
@@ -57,7 +59,10 @@ python -m minicode --chat "先看一下项目结构"
 ```mermaid
 flowchart TD
     A[User query] --> B[Build prompt with context and tool descriptions]
-    B --> C[LLM returns JSON action]
+    B --> P{Workspace inspection request?}
+    P -->|yes| Q[Inject mandatory first action<br/>model must return list_files]
+    P -->|no| C[LLM returns JSON action]
+    Q --> C
     C --> D{Decision}
     D -->|tool call| E[Execute tool]
     E --> F[Record step log]
@@ -80,11 +85,15 @@ flowchart TD
     F --> D
     E -->|/exit| G[Finalize one session run log]
     E -->|normal input| H[Route skills for this turn]
-    H --> I[Run agent loop for current turn]
-    I --> J[Render final answer]
-    J --> K[Append answer/action/observations to session messages]
-    K --> D
-    G --> L[Run memory sedimentation and dreaming once]
+    H --> P{Workspace inspection request?}
+    P -->|yes| Q[Inject mandatory first action<br/>model calls list_files]
+    P -->|no| I[Run iter_turn event stream]
+    Q --> I
+    I --> J[Render model action and tool result events]
+    J --> K[Render final answer]
+    K --> L[Append answer/action/observations to session messages]
+    L --> D
+    G --> M[Run memory sedimentation and dreaming once]
 ```
 
 ```mermaid
@@ -169,13 +178,13 @@ MiniCode/
 - `.gitignore`：忽略 `.minicode/`、Python 缓存和安装元数据。`.minicode/` 是本机持久运行数据目录，但默认不提交到 Git。
 - `minicode/__main__.py`：支持 `python -m minicode` 的入口文件，只负责转发到 CLI。
 - `minicode/cli.py`：命令行入口，解析参数，创建 `DeepSeekClient`、`DockerSandbox`、`CodingAgent`，并处理 `--check`、`--eval`、`--chat`、`--run-log` 等模式。
-- `minicode/agent.py`：agent 主循环和持续对话 session。`CodingAgent.run()` 负责单任务执行；`CodingSession` 负责多轮用户输入共享同一份 messages/context，并在 session 关闭时统一 finalize。
+- `minicode/agent.py`：agent 主循环和持续对话 session。`CodingAgent.run()` 负责单任务执行；`CodingSession` 负责多轮用户输入共享同一份 messages/context，`iter_turn()` 负责输出实时 UI events，并在 session 关闭时统一 finalize。
 - `minicode/llm.py`：DeepSeek API client。调用 OpenAI-compatible `/chat/completions`，返回模型内容、token 用量和耗时。
 - `minicode/tools.py`：Tool runtime。注册并执行当前支持的 tools，统一返回 `ToolResult`。
 - `minicode/sandbox.py`：Docker sandbox。负责把命令放进 Docker 的 `/workspace` 中执行，并收集 stdout、stderr、exit code、耗时和权限信息。
 - `minicode/permissions.py`：命令权限策略。对危险命令做 `allow`、`ask`、`deny` 判断，并支持 `never`、`ask`、`always` 三种审批模式。
 - `minicode/context.py`：多层上下文构建与压缩。负责 L0-L3 层说明、初始文件索引、大 observation 外置、占位预览、结构化 notes 和历史超限压缩。
-- `minicode/ui/repl.py`：交互式 CLI 前端。负责 `--chat` REPL、输入历史、slash command 分发、turn 执行和 session 保存。
+- `minicode/ui/repl.py`：交互式 CLI 前端。负责 `--chat` REPL、输入历史、slash command 分发、消费 `iter_turn()` 事件流和 session 保存。
 - `minicode/ui/commands.py`：解析 `/help`、`/status`、`/exit` 等 slash commands。
 - `minicode/ui/render.py`：终端输出渲染。优先使用 `rich`，不可用时退回普通文本。
 - `minicode/observability.py`：结构化日志模型。记录每一步的模型输入摘要、action、tool 参数、权限决策、输出、修改文件、token、耗时和 retrieval trace。

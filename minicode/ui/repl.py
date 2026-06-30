@@ -72,11 +72,13 @@ class MiniCodeRepl:
 
     def _run_turn(self, session: CodingSession, user_message: str) -> None:
         try:
-            result = session.run_turn(user_message)
+            for event in session.iter_turn(user_message):
+                self.renderer.event(event)
+                if event.kind == "turn_finish":
+                    self.renderer.answer(str(event.data.get("answer") or event.message))
         except RuntimeError as exc:
             self.renderer.error(str(exc))
             return
-        self.renderer.answer(result.answer)
 
     def _handle_command(self, command, session: CodingSession) -> None:
         if command.name == "help":
