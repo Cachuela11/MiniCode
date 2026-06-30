@@ -65,6 +65,7 @@ class SkillRoute:
     reranker: str = "none"
     rerank_token_usage: dict[str, int] = field(default_factory=dict)
     rerank_error: str = ""
+    retrieval_trace: dict | None = None
 
     def to_log_dict(self) -> dict:
         return {
@@ -75,6 +76,7 @@ class SkillRoute:
             "reranker": self.reranker,
             "rerank_token_usage": self.rerank_token_usage,
             "rerank_error": self.rerank_error,
+            "retrieval_trace": self.retrieval_trace,
         }
 
 

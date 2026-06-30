@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from .catalog import SkillCatalog
-from .ranker import LlmSkillRanker, RuleBasedSkillRanker
-from .retriever import MetadataSkillRetriever
 from .schema import SkillRoute
+from ..retrieval.skill import SkillToolRetriever
 
 
 class TwoStageSkillRouter:
@@ -25,37 +24,22 @@ class TwoStageSkillRouter:
         if self.max_skills == 0:
             return SkillRoute(intent="none", rejected=self.catalog.names())
 
-        recalled = MetadataSkillRetriever(self.catalog, top_k=self.recall_k).retrieve(task)
-        rank_result = self._rerank(task, recalled)
-        selected = rank_result.selected
-        selected_names = {item.skill.name for item in selected}
-        recalled_names = {item.skill.name for item in recalled}
-        rerank_rejected = sorted(recalled_names - selected_names)
-        not_recalled = sorted(set(self.catalog.names()) - recalled_names)
-        rejected = [f"rerank_rejected:{name}" for name in rerank_rejected]
-        intent = rank_result.intent
-        if not recalled:
-            rejected = self.catalog.names()
-        else:
-            rejected.extend(f"not_recalled:{name}" for name in not_recalled)
+        retrieval = SkillToolRetriever(
+            self.catalog,
+            llm=self.llm,
+            model=self.model,
+            recall_k=self.recall_k,
+        ).retrieve(task, limit=self.max_skills)
         return SkillRoute(
-            intent=intent,
-            recalled=recalled,
-            selected=selected,
-            rejected=rejected,
-            reranker=rank_result.reranker,
-            rerank_token_usage=rank_result.token_usage,
-            rerank_error=rank_result.error,
+            intent=retrieval.intent,
+            recalled=retrieval.recalled,
+            selected=retrieval.selected,
+            rejected=retrieval.rejected,
+            reranker=retrieval.reranker,
+            rerank_token_usage=retrieval.rerank_token_usage,
+            rerank_error=retrieval.rerank_error,
+            retrieval_trace=retrieval.trace.to_log_dict(),
         )
-
-    def _rerank(self, task: str, recalled):
-        if self.llm is None:
-            selected = RuleBasedSkillRanker(max_skills=self.max_skills).rank(task, recalled)
-            intent = selected[0].skill.intents[0] if selected and selected[0].skill.intents else "general"
-            from .schema import RankResult
-
-            return RankResult(intent=intent, selected=selected, reranker="rule")
-        return LlmSkillRanker(self.llm, model=self.model, max_skills=self.max_skills).rank(task, recalled)
 
 
 class RuleBasedSkillRouter(TwoStageSkillRouter):

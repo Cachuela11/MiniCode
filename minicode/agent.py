@@ -121,6 +121,7 @@ class CodingAgent:
             memory_store=self.memory_store,
             llm=self.llm,
             model=self.config.model,
+            skill_recall_k=self.config.skill_recall_k,
         )
         self.tools.set_skill_catalog(self.skill_catalog)
         self.tools.set_memory_store(self.memory_store)

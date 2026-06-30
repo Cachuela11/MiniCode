@@ -163,11 +163,11 @@ MiniCode/
 - `minicode/harness.py`：后续 harness 占位。未来用于自动判断项目类型、运行验证命令和驱动修复循环。
 - `minicode/memory.py`：文件型 memory store。管理 `.minicode/memory` 下的 Markdown/Text 记忆，支持检索、写入、归档和索引更新。
 - `minicode/dreaming.py`：离线 memory dreaming。负责判断触发条件、精确去重、调用 DeepSeek 合并摘要，并把旧长期记忆归档。
-- `minicode/retrieval/`：统一检索基础层。提供 `RetrievalCandidate`、`RetrievalResult`、`RetrievalTrace` 等共享结构；`search_skills` 和 `search_memory` 的 action 仍然分开，但 run log 使用统一 trace 记录检索过程。
+- `minicode/retrieval/`：统一检索基础层。提供 `RetrievalCandidate`、`RetrievalResult`、`RetrievalTrace` 等共享结构；`search_skills` 和 `search_memory` 的 action 仍然分开，但底层共享检索 trace 结构。
 - `minicode/skills/schema.py`：定义 `Skill`、`SelectedSkill`、`SkillRoute` 等数据结构。
 - `minicode/skills/loader.py`：读取 `.skills/*.md`，解析 frontmatter 和正文。
 - `minicode/skills/catalog.py`：管理已加载的 skill，提供按名称查询和枚举能力。
-- `minicode/skills/router.py`：Skill 路由总控。先做元信息粗召回，再交给 DeepSeek 精排候选 skill。
+- `minicode/skills/router.py`：Skill 路由入口。复用 `SkillToolRetriever` 做元信息粗召回和 DeepSeek 精排，再把 selected skills 转成 `SkillRoute`。
 - `minicode/skills/prompt.py`：把选中的 skill 渲染成 prompt 文本，注入给模型。
 - `minicode/evolution.py`：记忆沉淀触发器。当前实现“session 摘要 -> 规则信号初筛 -> DeepSeek 长期记忆分类 -> 写入 memory”。
 
@@ -189,7 +189,7 @@ flowchart TD
     H --> J[Start agent loop]
 ```
 
-当前实现两阶段路由：
+当前 skill route 和 `search_skills` 复用同一个底层检索逻辑，都是两阶段：
 
 - MiniCode 本地读取 `.skills/*.md`，解析 frontmatter 和正文。
 - 第一阶段 `MetadataSkillRetriever` 用任务文本匹配 `triggers`、`tags`、`intents`、skill 名称和 description，粗召回 topK。
@@ -198,7 +198,8 @@ flowchart TD
 - 默认最多注入 `2` 个 skill，可用 `--max-skills` 调整。
 - 默认粗召回 `8` 个候选，可用 `--skill-recall-k` 调整。
 - 没有命中 skill 时，仍然会注入完整 tool 列表，模型依然能调用 tools。
-- run log 会记录 `skill_route.recalled`、`skill_route.selected`、`reranker` 和精排 token 用量，方便后续 eval 对比 skill 是否有效。
+- 自动 route 会把 selected skills 渲染成 prompt；`search_skills` tool 会把 selected skills 渲染成 observation。
+- run log 会记录 `skill_route.recalled`、`skill_route.selected`、`skill_route.retrieval_trace`、`reranker` 和精排 token 用量，方便后续 eval 对比 skill 是否有效。
 
 **统一 Retriever**
 
@@ -210,10 +211,26 @@ search_memory -> MemoryToolRetriever -> RetrievalTrace(kind=memory)
 ```
 
 - `schema.py`：定义 `RetrievalCandidate`、`RetrievalResult`、`RetrievalStage`、`RetrievalTrace`。
-- `skill.py`：包装现有 skill 元信息召回，不做 memory 降权。
+- `skill.py`：统一 skill 检索底层。先做 metadata 粗召回，再做 DeepSeek 精排；自动 route 和 `search_skills` tool 都复用它。
 - `memory.py`：实现 memory 检索三阶段：关键词粗召回、动态加权、本地 topK 后交给 DeepSeek 精排；如果 LLM 精排失败，会退回本地加权结果。
 - `ranking.py`：放通用文本规范化和 reason 处理。
 - 每次 `search_skills` / `search_memory` 的结果都会写入 step log 的 `retrieval_trace`，方便后续 eval 对比检索质量。
+
+Skill 检索召回与精排流程：
+
+```mermaid
+flowchart TD
+    A[task or search_skills query] --> B[metadata_recall<br/>triggers + intents + tags + name + description]
+    B --> C[Recalled skill candidates<br/>default top 8]
+    C --> D{DeepSeek rerank available?}
+    D -->|yes| E[llm_rerank<br/>select skill names + reasons]
+    D -->|no / error| F[Rule fallback rerank]
+    E --> G[Selected skills]
+    F --> G
+    G --> H{Entry}
+    H -->|automatic route| I[render_skill_prompt<br/>inject into current turn]
+    H -->|search_skills tool| J[return observation<br/>write retrieval_trace]
+```
 
 Memory 检索召回与精排流程：
 

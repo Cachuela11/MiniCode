@@ -40,6 +40,7 @@ class ToolRegistry:
         memory_store: FileMemoryStore | NullMemory | None = None,
         llm: Any | None = None,
         model: str = "",
+        skill_recall_k: int = 8,
     ):
         self.workspace = workspace.resolve()
         self.sandbox = sandbox
@@ -48,6 +49,7 @@ class ToolRegistry:
         self.memory_store = memory_store or NullMemory()
         self.llm = llm
         self.model = model
+        self.skill_recall_k = max(0, skill_recall_k)
         self._tools: dict[str, ToolHandler] = {
             "run_shell": self._run_shell,
             "list_files": self._list_files,
@@ -194,9 +196,14 @@ class ToolRegistry:
         if not query:
             message = "ERROR: search_skills requires args.query."
             return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
-        retrieval = SkillToolRetriever(self.skill_catalog).retrieve(query, limit=limit)
-        recalled = retrieval.recalled
-        if not recalled:
+        retrieval = SkillToolRetriever(
+            self.skill_catalog,
+            llm=self.llm,
+            model=self.model,
+            recall_k=self.skill_recall_k,
+        ).retrieve(query, limit=limit)
+        selected = retrieval.selected
+        if not selected:
             output = "No matching skills found."
             return ToolResult(
                 True,
@@ -206,7 +213,7 @@ class ToolRegistry:
                 retrieval_trace=retrieval.trace.to_log_dict(),
             )
         rows = ["Matching skills:"]
-        for item in recalled:
+        for item in selected:
             skill = item.skill
             rows.append(
                 "\n".join(
@@ -214,6 +221,7 @@ class ToolRegistry:
                         f"- name: {skill.name}",
                         f"  score: {item.score}",
                         f"  reason: {item.reason}",
+                        f"  recall_score: {item.recall_score}",
                         f"  description: {skill.description}",
                         f"  tags: {', '.join(skill.tags) or 'none'}",
                         f"  recommended_tools: {', '.join(skill.tools) or 'none'}",
