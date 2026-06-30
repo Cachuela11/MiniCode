@@ -15,6 +15,7 @@ MiniCode 是一个最小可运行的 coding agent 框架。当前阶段的目标
 - Python 3.11+
 - Docker
 - DeepSeek API Key
+- Python dependencies: `rich`、`prompt_toolkit`
 
 ## 快速开始
 
@@ -41,6 +42,14 @@ python -m minicode --chat "先看一下项目结构"
 
 `--chat` 会启动一个持续 session。每次输入都会触发一轮 agent loop，但 messages、context artifacts、structured notes 和文件修改快照会保留到下一轮。输入 `/exit`、`/quit` 或 Ctrl+Z 后退出，退出时写一份 session run log，并在 session 结束时统一做 memory sedimentation / dreaming。
 
+当前交互式前端支持：
+
+- `/help`：显示可用命令。
+- `/status`：显示当前 model、workspace、run id、turn 数、step 数、messages、artifacts、notes、token 等状态。
+- `/exit` / `/quit`：保存并退出 session。
+- 输入历史：优先使用 `prompt_toolkit`，历史文件写入 `.minicode/chat-history.txt`；如果依赖不可用，会退回普通 `input()`。
+- 输出渲染：优先使用 `rich` 展示 banner、表格和 Markdown；如果依赖不可用，会退回普通文本输出。
+
 ## Agent Loop
 
 单任务模式：
@@ -64,15 +73,18 @@ flowchart TD
 ```mermaid
 flowchart TD
     A[python -m minicode --chat] --> B[Create CodingSession]
-    B --> C[Load initial workspace context]
+    B --> C[MiniCodeRepl renders banner]
     C --> D[Wait for user input]
-    D --> E[Route skills for this turn]
-    E --> F[Run agent loop for current turn]
-    F --> G[Append answer/action/observations to session messages]
-    G --> H{User exits?}
-    H -->|no| D
-    H -->|yes| I[Finalize one session run log]
-    I --> J[Run memory sedimentation and dreaming once]
+    D --> E{Slash command?}
+    E -->|/help or /status| F[Handle in CLI frontend]
+    F --> D
+    E -->|/exit| G[Finalize one session run log]
+    E -->|normal input| H[Route skills for this turn]
+    H --> I[Run agent loop for current turn]
+    I --> J[Render final answer]
+    J --> K[Append answer/action/observations to session messages]
+    K --> D
+    G --> L[Run memory sedimentation and dreaming once]
 ```
 
 ```mermaid
@@ -130,6 +142,11 @@ MiniCode/
     harness.py
     memory.py
     dreaming.py
+    ui/
+      __init__.py
+      commands.py
+      render.py
+      repl.py
     retrieval/
       __init__.py
       schema.py
@@ -158,6 +175,9 @@ MiniCode/
 - `minicode/sandbox.py`：Docker sandbox。负责把命令放进 Docker 的 `/workspace` 中执行，并收集 stdout、stderr、exit code、耗时和权限信息。
 - `minicode/permissions.py`：命令权限策略。对危险命令做 `allow`、`ask`、`deny` 判断，并支持 `never`、`ask`、`always` 三种审批模式。
 - `minicode/context.py`：多层上下文构建与压缩。负责 L0-L3 层说明、初始文件索引、大 observation 外置、占位预览、结构化 notes 和历史超限压缩。
+- `minicode/ui/repl.py`：交互式 CLI 前端。负责 `--chat` REPL、输入历史、slash command 分发、turn 执行和 session 保存。
+- `minicode/ui/commands.py`：解析 `/help`、`/status`、`/exit` 等 slash commands。
+- `minicode/ui/render.py`：终端输出渲染。优先使用 `rich`，不可用时退回普通文本。
 - `minicode/observability.py`：结构化日志模型。记录每一步的模型输入摘要、action、tool 参数、权限决策、输出、修改文件、token、耗时和 retrieval trace。
 - `minicode/eval.py`：内置 eval 任务集和指标汇总。用于衡量任务成功率、测试通过率、tool 调用次数、危险命令等。
 - `minicode/harness.py`：后续 harness 占位。未来用于自动判断项目类型、运行验证命令和驱动修复循环。

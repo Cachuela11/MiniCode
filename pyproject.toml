@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "A minimal Claude Code style coding agent with Docker sandbox and DeepSeek API."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "prompt_toolkit>=3.0",
+    "rich>=13.7",
+]
 
 [project.scripts]
 minicode = "minicode.cli:main"

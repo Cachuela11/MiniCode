@@ -15,6 +15,7 @@ from .memory import FileMemoryStore
 from .permissions import AlwaysApprove, ConsoleApproval, NeverApprove
 from .sandbox import DockerSandbox
 from .skills import SkillCatalog
+from .ui import MiniCodeRepl
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -299,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
     agent = _build_agent(args=args, llm=llm, sandbox=sandbox, skill_catalog=skill_catalog)
 
     if args.chat:
-        return _run_chat(agent=agent, args=args)
+        return MiniCodeRepl(agent=agent, args=args, run_log_writer=_write_run_log).run()
 
     try:
         result = agent.run(" ".join(args.task))
@@ -357,50 +358,6 @@ def _build_agent(args, llm, sandbox: DockerSandbox, skill_catalog: SkillCatalog)
         ),
         skill_catalog=skill_catalog,
     )
-
-
-def _run_chat(agent: CodingAgent, args) -> int:
-    session = agent.start_session()
-    initial_task = " ".join(args.task).strip()
-    print("MiniCode chat session started. Type /exit, /quit, or Ctrl+Z then Enter to stop.")
-    try:
-        if initial_task:
-            _run_chat_turn(session, initial_task)
-        while True:
-            try:
-                user_message = input("minicode> ").strip()
-            except EOFError:
-                print()
-                break
-            except KeyboardInterrupt:
-                print("\nInterrupted. Closing chat session.")
-                break
-            if not user_message:
-                continue
-            if user_message.lower() in {"/exit", "/quit", "exit", "quit"}:
-                break
-            _run_chat_turn(session, user_message)
-    finally:
-        run_log = session.close()
-        if args.transcript:
-            transcript_path = Path(args.transcript)
-            transcript_path.write_text(
-                json.dumps(session.transcript, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        if args.run_log and run_log:
-            run_log_path = _write_run_log(Path(args.run_log), run_log.to_dict())
-            print(f"Session run log written to {run_log_path}")
-    return 0
-
-
-def _run_chat_turn(session, user_message: str) -> None:
-    try:
-        result = session.run_turn(user_message)
-    except RuntimeError as exc:
-        print(f"ERROR: {exc}")
-        return
-    print(result.answer)
 
 
 def _build_approval_provider(mode: str):
