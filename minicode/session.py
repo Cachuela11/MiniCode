@@ -12,6 +12,7 @@ from .llm import LLMStreamDelta, LLMStreamDone
 from .observability import FileSnapshot, RunLog, StepLog, Timer, TokenUsage, make_run_id, summarize_messages
 from .policy import PolicyEngine
 from .prompts import SYSTEM_PROMPT_TEMPLATE, build_turn_message
+from .resume import ResumeResult
 from .skills import SkillRoute, render_skill_prompt
 
 if TYPE_CHECKING:
@@ -83,6 +84,25 @@ class CodingSession:
         self.skill_routes: list[dict[str, Any]] = []
         self.closed = False
 
+    def resume(self, resume_result: ResumeResult) -> None:
+        self.messages.append(
+            {
+                "role": "user",
+                "content": resume_result.message_content,
+            }
+        )
+        self.run_log.session_turns.append(
+            {
+                "turn": "resume",
+                "user": f"/resume {resume_result.source_path}",
+                "answer": (
+                    f"Resumed {resume_result.restored_turns} turn(s) and "
+                    f"{resume_result.restored_steps} historical step(s)."
+                ),
+                "source_path": str(resume_result.source_path),
+            }
+        )
+
     def run_turn(self, user_message: str) -> SessionTurnResult:
         final: SessionTurnResult | None = None
         for event in self.iter_turn(user_message):
@@ -103,6 +123,8 @@ class CodingSession:
         self.turn += 1
         turn = self.turn
         turn_transcript: list[dict[str, Any]] = []
+        turn_log = {"turn": turn, "user": user_message, "answer": "", "steps": 0}
+        self.run_log.session_turns.append(turn_log)
         yield SessionEvent(kind="turn_start", turn=turn, message=user_message)
         skill_route = self.agent._route_skills(user_message)
         route_log = skill_route.to_log_dict()
@@ -234,6 +256,8 @@ class CodingSession:
                 self.run_log.token_usage.add(llm_response.token_usage)
                 self.messages.append({"role": "assistant", "content": json.dumps(action)})
                 self.answers.append({"turn": turn, "answer": answer})
+                turn_log["answer"] = answer
+                turn_log["steps"] = local_step
                 self.run_log.answer = _render_session_answers(self.answers)
                 yield SessionEvent(
                     kind="turn_finish",
@@ -314,6 +338,8 @@ class CodingSession:
 
         answer = f"Stopped after {self.agent.config.max_steps} steps without finish."
         self.answers.append({"turn": turn, "answer": answer})
+        turn_log["answer"] = answer
+        turn_log["steps"] = self.agent.config.max_steps
         self.run_log.answer = _render_session_answers(self.answers)
         self.messages.append({"role": "user", "content": f"Turn {turn} stopped: {answer}"})
         yield SessionEvent(

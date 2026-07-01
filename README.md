@@ -44,13 +44,23 @@ python -m minicode --chat "先看一下项目结构"
 
 当前交互式前端支持：
 
-- 基础命令：`/help`、`/status`、`/exit`、`/quit`。
+- 基础命令：`/help`、`/resume`、`/status`、`/exit`、`/quit`。
 - 输入体验：优先使用 `prompt_toolkit` 保存历史到 `.minicode/chat-history.txt`，不可用时退回普通 `input()`。
 - 实时执行状态：`CodingSession.iter_turn()` 输出事件流，UI 会显示 turn、skill route、policy、step、model action、tool result 和 context compaction。
 - 等待反馈：模型调用和 tool 执行期间显示 spinner，并在完成后展示耗时。
 - 结构化 trace：按 `Turn` / `Step` 分块展示，区分 `model`、`tool`、`result`、`stdout/stderr preview`，不再把完整最终回答塞进 trace。
 - 结果分区：最终回答只显示在单独的 `Answer` 区块中。
 - 流式响应：`--chat` 默认使用 DeepSeek streaming；如果网关不支持会自动 fallback。可用 `--no-stream` 关闭。
+
+恢复历史对话：
+
+```text
+/resume
+/resume .minicode/runs/20260621-221530-run_xxx.json
+/resume .minicode/runs
+```
+
+`/resume` 不带参数时，会列出当前 `--run-log` 指向目录里的历史 session 记录；`/resume 目录` 会列出该目录下的记录；`/resume 文件.json` 会直接恢复指定 run log。选择式恢复时，输入列表里的编号即可进入对应历史上下文。恢复时不会重新执行旧工具调用，而是把旧 session 的 user/answer、最近 tool trace、policy intents 和 context metadata 压缩成一段背景上下文注入当前 session。恢复后下一次输入会带着这段历史继续对话；如果需要确认当前文件状态，模型仍应重新调用 file tools。
 
 trace 示例：
 
@@ -215,6 +225,7 @@ MiniCode/
     action_parser.py
     prompts.py
     policy.py
+    resume.py
     llm.py
     tools.py
     sandbox.py
@@ -258,6 +269,7 @@ MiniCode/
 - `minicode/action_parser.py`：解析模型返回的 JSON action，并从 `finish` action 中提取最终回答。
 - `minicode/prompts.py`：构建 system prompt、单任务 user message 和多轮对话 turn message。
 - `minicode/policy.py`：统一干预链路。根据当前 user query 生成本轮策略，例如强制先 `list_files`、要求先查文件、修改后考虑测试等。
+- `minicode/resume.py`：历史对话恢复。负责定位 run log、读取 JSON，并把历史 session 压缩成可注入当前上下文的 resume context。
 - `minicode/llm.py`：DeepSeek API client。调用 OpenAI-compatible `/chat/completions`，返回模型内容、token 用量和耗时。
 - `minicode/tools.py`：Tool runtime。注册并执行当前支持的 tools，统一返回 `ToolResult`。
 - `minicode/sandbox.py`：Docker sandbox。负责把命令放进 Docker 的 `/workspace` 中执行，并收集 stdout、stderr、exit code、耗时和权限信息。

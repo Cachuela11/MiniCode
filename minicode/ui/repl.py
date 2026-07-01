@@ -5,6 +5,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..agent import CodingAgent, CodingSession
+from ..resume import (
+    build_resume_result,
+    find_resume_log,
+    list_resume_candidates,
+    load_resume_log,
+    resolve_resume_selection,
+)
 from .commands import is_known_command, parse_slash_command
 from .render import CliRenderer
 
@@ -87,10 +94,61 @@ class MiniCodeRepl:
         if command.name == "status":
             self.renderer.status(session)
             return
+        if command.name == "resume":
+            self._handle_resume(command.args, session)
+            return
         if not is_known_command(command):
             self.renderer.error(f"unknown command /{command.name}; try /help")
             return
         self.renderer.help()
+
+    def _handle_resume(self, raw_path: str, session: CodingSession) -> None:
+        try:
+            path = self._select_resume_path(raw_path)
+            payload = load_resume_log(path)
+            result = build_resume_result(payload, path)
+            if result.restored_turns == 0 and result.restored_steps == 0 and not payload.get("answer"):
+                self.renderer.error(f"resume failed: selected session has no recoverable content: {path}")
+                return
+            session.resume(result)
+        except Exception as exc:
+            self.renderer.error(f"resume failed: {exc}")
+            return
+        self.renderer.note(
+            f"Resumed {result.restored_turns} turn(s), {result.restored_steps} step(s) from {result.source_path}"
+        )
+
+    def _select_resume_path(self, raw_path: str) -> Path:
+        target_text = raw_path.strip()
+        if target_text:
+            target = Path(target_text)
+            if not target.is_absolute():
+                target = self.agent.sandbox.workspace / target
+            if target.is_file():
+                return find_resume_log(
+                    raw_path,
+                    workspace=self.agent.sandbox.workspace,
+                    default_target=self.args.run_log or ".minicode/runs",
+                )
+
+        candidates = list_resume_candidates(
+            raw_path,
+            workspace=self.agent.sandbox.workspace,
+            default_target=self.args.run_log or ".minicode/runs",
+        )
+        if not candidates:
+            raise FileNotFoundError("no session run logs found")
+        self.renderer.resume_candidates(candidates)
+        selection = self._read_resume_selection()
+        candidate = resolve_resume_selection(candidates, selection)
+        if not candidate.resumable:
+            raise ValueError(f"session #{candidate.index} has no recoverable content")
+        return candidate.path
+
+    def _read_resume_selection(self) -> str:
+        if self.prompt_session is not None:
+            return self.prompt_session.prompt("resume> ").strip()
+        return input("resume> ").strip()
 
     def _read_input(self) -> str:
         if self.prompt_session is not None:

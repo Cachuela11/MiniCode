@@ -61,6 +61,7 @@ class CliRenderer:
     def help(self) -> None:
         rows = [
             ("/help", "Show available commands."),
+            ("/resume [path]", "Resume context from a previous session run log."),
             ("/status", "Show current session state."),
             ("/exit", "Save and close the session."),
             ("/quit", "Alias for /exit."),
@@ -105,6 +106,36 @@ class CliRenderer:
         print("Session status:")
         for name, value in rows:
             print(f"  {name}: {value}")
+
+    def resume_candidates(self, candidates: list[Any]) -> None:
+        if self.console and Table:
+            table = Table(title="Resume Sessions")
+            table.add_column("#", style="cyan", justify="right")
+            table.add_column("State")
+            table.add_column("Turns", justify="right")
+            table.add_column("Steps", justify="right")
+            table.add_column("Started")
+            table.add_column("Task")
+            for candidate in candidates:
+                state = "ready" if candidate.resumable else "empty"
+                table.add_row(
+                    str(candidate.index),
+                    state,
+                    str(candidate.turns),
+                    str(candidate.steps),
+                    _text_preview(candidate.started_at, limit=22),
+                    _text_preview(candidate.task or candidate.path.name, limit=44),
+                )
+            self.console.print(table)
+            return
+        print("Resume sessions:")
+        for candidate in candidates:
+            state = "ready" if candidate.resumable else "empty"
+            print(
+                f"  {candidate.index:>2}. [{state}] turns={candidate.turns} "
+                f"steps={candidate.steps} started={candidate.started_at} "
+                f"task={candidate.task or candidate.path.name}"
+            )
 
     def answer(self, answer: str) -> None:
         text = answer or "The model finished without providing an answer."
