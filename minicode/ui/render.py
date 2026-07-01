@@ -62,6 +62,7 @@ class CliRenderer:
         rows = [
             ("/help", "Show available commands."),
             ("/resume [path]", "Resume context from a previous session run log."),
+            ("/sessions", "List or delete saved sessions."),
             ("/status", "Show current session state."),
             ("/exit", "Save and close the session."),
             ("/quit", "Alias for /exit."),
@@ -136,6 +137,13 @@ class CliRenderer:
                 f"steps={candidate.steps} started={candidate.started_at} "
                 f"task={candidate.task or candidate.path.name}"
             )
+
+    def session_deleted(self, result: Any) -> None:
+        message = (
+            f"Deleted session {result.run_id}; archived {len(result.archived_memories)} memory item(s). "
+            f"Run log moved to {result.deleted_log_path}"
+        )
+        self.note(message)
 
     def answer(self, answer: str) -> None:
         text = answer or "The model finished without providing an answer."

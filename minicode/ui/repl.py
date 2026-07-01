@@ -7,6 +7,7 @@ from typing import Any, Callable
 from ..agent import CodingAgent, CodingSession
 from ..resume import (
     build_resume_result,
+    delete_session_log,
     find_resume_log,
     list_resume_candidates,
     load_resume_log,
@@ -97,6 +98,9 @@ class MiniCodeRepl:
         if command.name == "resume":
             self._handle_resume(command.args, session)
             return
+        if command.name == "sessions":
+            self._handle_sessions(command.args)
+            return
         if not is_known_command(command):
             self.renderer.error(f"unknown command /{command.name}; try /help")
             return
@@ -117,6 +121,69 @@ class MiniCodeRepl:
         self.renderer.note(
             f"Resumed {result.restored_turns} turn(s), {result.restored_steps} step(s) from {result.source_path}"
         )
+
+    def _handle_sessions(self, args: str) -> None:
+        command, _, rest = args.strip().partition(" ")
+        command = command or "list"
+        target = rest.strip()
+        if command == "list":
+            self._list_sessions(target)
+            return
+        if command == "delete":
+            self._delete_session(target)
+            return
+        self.renderer.error("unknown /sessions command; use /sessions, /sessions delete <number|path>")
+
+    def _list_sessions(self, raw_path: str = "") -> list[Any]:
+        try:
+            candidates = list_resume_candidates(
+                raw_path,
+                workspace=self.agent.sandbox.workspace,
+                default_target=self.args.run_log or ".minicode/runs",
+            )
+        except Exception as exc:
+            self.renderer.error(f"sessions failed: {exc}")
+            return []
+        if not candidates:
+            self.renderer.note("No saved sessions found.")
+            return []
+        self.renderer.resume_candidates(candidates)
+        return candidates
+
+    def _delete_session(self, target: str) -> None:
+        try:
+            path = self._select_session_delete_path(target)
+            payload = load_resume_log(path)
+            run_id = payload.get("run_id") or path.name
+            if not self._confirm(f"Delete session {run_id} and archive linked memories? [y/N] "):
+                self.renderer.note("Session delete cancelled.")
+                return
+            result = delete_session_log(path, self.agent.memory_store)
+        except Exception as exc:
+            self.renderer.error(f"session delete failed: {exc}")
+            return
+        self.renderer.session_deleted(result)
+
+    def _select_session_delete_path(self, target: str) -> Path:
+        target = target.strip()
+        if target:
+            path = Path(target)
+            if not path.is_absolute():
+                path = self.agent.sandbox.workspace / path
+            if path.is_file():
+                return path
+            if target.isdigit():
+                candidates = list_resume_candidates(
+                    "",
+                    workspace=self.agent.sandbox.workspace,
+                    default_target=self.args.run_log or ".minicode/runs",
+                )
+                return resolve_resume_selection(candidates, target).path
+        candidates = self._list_sessions("")
+        if not candidates:
+            raise FileNotFoundError("no saved sessions found")
+        selection = self._prompt("delete session> ")
+        return resolve_resume_selection(candidates, selection).path
 
     def _select_resume_path(self, raw_path: str) -> Path:
         target_text = raw_path.strip()
@@ -146,9 +213,15 @@ class MiniCodeRepl:
         return candidate.path
 
     def _read_resume_selection(self) -> str:
+        return self._prompt("resume> ")
+
+    def _prompt(self, prompt: str) -> str:
         if self.prompt_session is not None:
-            return self.prompt_session.prompt("resume> ").strip()
-        return input("resume> ").strip()
+            return self.prompt_session.prompt(prompt).strip()
+        return input(prompt).strip()
+
+    def _confirm(self, prompt: str) -> bool:
+        return self._prompt(prompt).lower() in {"y", "yes"}
 
     def _read_input(self) -> str:
         if self.prompt_session is not None:

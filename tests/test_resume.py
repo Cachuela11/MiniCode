@@ -3,11 +3,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from minicode.memory import FileMemoryStore, MemoryCandidate
 from minicode.resume import (
     build_resume_result,
+    delete_session_log,
     find_resume_log,
     list_resume_candidates,
     load_resume_log,
+    related_memory_ids_for_run,
     resolve_resume_selection,
 )
 
@@ -68,6 +71,47 @@ class ResumeTests(unittest.TestCase):
         self.assertIn("Recovered conversation turns", result.message_content)
         self.assertIn("user: hello", result.message_content)
         self.assertIn("answer: hi", result.message_content)
+
+    def test_delete_session_archives_related_memory_chain(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            log_path = root / "runs" / "run.json"
+            log_path.parent.mkdir()
+            log_path.write_text(
+                json.dumps({"run_id": "run_abc", "answer": "done", "steps": [{"step": 1}]}),
+                encoding="utf-8",
+            )
+            store = FileMemoryStore(workspace=root, memory_dir=".minicode/memory")
+            session_write = store.write_candidate(
+                MemoryCandidate(
+                    memory_type="session_memory",
+                    title="Session memory",
+                    body="session body",
+                    source_run_id="run_abc",
+                    source_trace_ids=["run_abc", "run_abc:step:1"],
+                )
+            )
+            long_term_write = store.write_candidate(
+                MemoryCandidate(
+                    memory_type="project_memory",
+                    title="Project memory",
+                    body="project body",
+                    parent_memory_ids=[session_write.memory_id],
+                )
+            )
+
+            related = related_memory_ids_for_run(store, "run_abc")
+            result = delete_session_log(log_path, store)
+
+            self.assertIn(session_write.memory_id, related)
+            self.assertIn(long_term_write.memory_id, related)
+            self.assertFalse(log_path.exists())
+            self.assertTrue(result.deleted_log_path.exists())
+            self.assertEqual(
+                sorted(item.memory_id for item in result.archived_memories),
+                sorted([session_write.memory_id, long_term_write.memory_id]),
+            )
+            self.assertEqual(store.all(), [])
 
 
 if __name__ == "__main__":

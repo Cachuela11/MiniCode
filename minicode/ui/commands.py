@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 
 EXIT_COMMANDS = {"exit", "quit", "q"}
-KNOWN_COMMANDS = {"help", "resume", "status", *EXIT_COMMANDS}
+KNOWN_COMMANDS = {"help", "resume", "sessions", "status", *EXIT_COMMANDS}
 
 
 @dataclass(frozen=True)

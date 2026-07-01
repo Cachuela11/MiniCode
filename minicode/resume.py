@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from .memory import FileMemoryStore, MemoryArchiveResult
 
 
 @dataclass(frozen=True)
@@ -25,6 +29,14 @@ class ResumeCandidate:
     steps: int
     answer_preview: str
     resumable: bool
+
+
+@dataclass(frozen=True)
+class SessionDeleteResult:
+    run_id: str
+    source_path: Path
+    deleted_log_path: Path
+    archived_memories: list[MemoryArchiveResult]
 
 
 def find_resume_log(raw_path: str, *, workspace: Path, default_target: str | Path) -> Path:
@@ -150,6 +162,42 @@ def build_resume_result(payload: dict[str, Any], source_path: Path) -> ResumeRes
     )
 
 
+def delete_session_log(path: Path, memory_store: FileMemoryStore) -> SessionDeleteResult:
+    payload = load_resume_log(path)
+    run_id = str(payload.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError(f"cannot delete session without run_id: {path}")
+
+    memory_ids = related_memory_ids_for_run(memory_store, run_id)
+    archived = memory_store.archive(memory_ids, reason=f"deleted_session:{run_id}") if memory_ids else []
+    deleted_log_path = _move_run_log_to_deleted(path)
+    return SessionDeleteResult(
+        run_id=run_id,
+        source_path=path,
+        deleted_log_path=deleted_log_path,
+        archived_memories=archived,
+    )
+
+
+def related_memory_ids_for_run(memory_store: FileMemoryStore, run_id: str) -> list[str]:
+    run_id = run_id.strip()
+    if not run_id:
+        return []
+    items = memory_store.all()
+    selected: set[str] = set()
+
+    changed = True
+    while changed:
+        changed = False
+        for item in items:
+            if item.memory_id in selected:
+                continue
+            if _memory_matches_run(item, run_id) or any(parent in selected for parent in item.parent_memory_ids):
+                selected.add(item.memory_id)
+                changed = True
+    return sorted(selected)
+
+
 def render_resume_context(payload: dict[str, Any], source_path: Path) -> str:
     rows = [
         "Resumed historical MiniCode session context.",
@@ -204,6 +252,35 @@ def render_resume_context(payload: dict[str, Any], source_path: Path) -> str:
         )
 
     return "\n".join(rows)
+
+
+def _memory_matches_run(item: Any, run_id: str) -> bool:
+    if item.source_run_id == run_id or item.source_run == run_id:
+        return True
+    return any(trace_id == run_id or trace_id.startswith(f"{run_id}:") for trace_id in item.source_trace_ids)
+
+
+def _move_run_log_to_deleted(path: Path) -> Path:
+    if not path.is_file():
+        raise FileNotFoundError(f"run log not found: {path}")
+    deleted_dir = path.parent / "_deleted"
+    deleted_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    target = _avoid_overwrite(deleted_dir / f"{timestamp}-{path.name}")
+    shutil.move(str(path), str(target))
+    return target
+
+
+def _avoid_overwrite(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    for index in range(1, 1000):
+        candidate = path.with_name(f"{stem}-{index}{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"could not find available deleted-session filename for {path}")
 
 
 def _render_step(step: dict[str, Any]) -> str:
