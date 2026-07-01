@@ -33,7 +33,9 @@ python -m minicode --chat
 minicode "inspect the workspace and create a hello.txt file"
 ```
 
-持续对话模式：
+## 交互式 CLI 前端
+
+启动持续对话模式：
 
 ```powershell
 python -m minicode --chat
@@ -42,30 +44,55 @@ python -m minicode --chat "先看一下项目结构"
 
 `--chat` 会启动一个持续 session。每次输入都会触发一轮 agent loop，但 messages、context artifacts、structured notes 和文件修改快照会保留到下一轮。输入 `/exit`、`/quit` 或 Ctrl+Z 后退出，退出时写一份 session run log，并在 session 结束时统一做 memory sedimentation / dreaming。
 
-当前交互式前端支持：
+当前 UI 功能集中在 `minicode/ui/`：
 
-- 基础命令：`/help`、`/resume`、`/sessions`、`/status`、`/exit`、`/quit`。
-- 输入体验：优先使用 `prompt_toolkit` 保存历史到 `.minicode/chat-history.txt`，不可用时退回普通 `input()`。
-- 实时执行状态：`CodingSession.iter_turn()` 输出事件流，UI 会显示 turn、skill route、policy、step、model action、tool result 和 context compaction。
+- 启动横幅：进入 chat 时显示 MiniCode 像素块 Logo、模型、workspace 和 run_id。
+- 输入体验：优先使用 `prompt_toolkit`，输入历史保存到 `.minicode/chat-history.txt`；不可用时退回普通 `input()`。
+- Slash commands：支持 `/help`、`/resume`、`/sessions`、`/status`、`/exit`、`/quit`。
+- 实时 trace：`CodingSession.iter_turn()` 输出事件流，UI 显示 turn、skill route、policy、step、model action、tool result 和 context compaction。
 - 等待反馈：模型调用和 tool 执行期间显示 spinner，并在完成后展示耗时。
-- 结构化 trace：按 `Turn` / `Step` 分块展示，区分 `model`、`tool`、`result`、`stdout/stderr preview`，不再把完整最终回答塞进 trace。
-- 结果分区：最终回答只显示在单独的 `Answer` 区块中。
 - 流式响应：`--chat` 默认使用 DeepSeek streaming；如果网关不支持会自动 fallback。可用 `--no-stream` 关闭。
+- 结果分区：执行轨迹只放 trace；最终回答只显示在单独的 `Answer` 区块中。
+- Session 持久化：退出 chat 时写入 `.minicode/runs/` run log；新格式 run log 会记录 `session_turns`，用于后续 `/resume`。
 
-恢复和管理历史对话：
+当前命令：
 
 ```text
+/help
+/status
 /resume
-/resume .minicode/runs/20260621-221530-run_xxx.json
 /resume .minicode/runs
+/resume .minicode/runs/20260621-221530-run_xxx.json
 /sessions
 /sessions delete 3
 /sessions delete .minicode/runs/20260621-221530-run_xxx.json
+/exit
+/quit
 ```
 
-`/resume` 不带参数时，会列出当前 `--run-log` 指向目录里的历史 session 记录；`/resume 目录` 会列出该目录下的记录；`/resume 文件.json` 会直接恢复指定 run log。选择式恢复时，输入列表里的编号即可进入对应历史上下文。恢复时不会重新执行旧工具调用，而是把旧 session 的 user/answer、最近 tool trace、policy intents 和 context metadata 压缩成一段背景上下文注入当前 session。恢复后下一次输入会带着这段历史继续对话；如果需要确认当前文件状态，模型仍应重新调用 file tools。
+命令说明：
 
-`/sessions` 用来列出保存过的 session；`/sessions delete <编号|文件>` 会删除对应 session。删除采用软删除：run log 会移动到 `.minicode/runs/_deleted/`，关联 memory 会移动到 `.minicode/memory/_archive/`，因此不会再出现在 `/resume`、`search_memory` 和 active memory index 里。关联 memory 的判断基于 `run_id`、`source_run_id`、`source_trace_ids` 和 `parent_memory_ids` 链路：直接 session memory、由该 session 沉淀出的长期 memory、以及 dreaming 后仍带有该 session 父链路的融合 memory 都会被一起归档。
+- `/help`：显示当前可用命令。
+- `/status`：显示当前 session 状态，包括 run_id、turns、steps、messages、context artifacts、notes、compactions、token 用量等。
+- `/resume`：列出当前 `--run-log` 指向目录里的历史 session，输入编号后把该历史上下文注入当前 session。
+- `/resume <目录>`：列出指定目录下的历史 session。
+- `/resume <文件.json>`：直接恢复指定 run log。
+- `/sessions`：列出保存过的 session。
+- `/sessions delete <编号|文件>`：删除指定 session。当前删除逻辑依赖新格式 run log 的 `run_id` 来追踪关联 memory；早期没有 `run_id` 的旧日志可能需要手动删除。
+- `/exit` / `/quit`：保存当前 session run log 并退出。
+
+`/resume` 的恢复来源是本地 run log，不是 `.minicode/chat-history.txt`。`chat-history.txt` 只是命令行输入历史；真正恢复给模型看的内容来自 run log 中的 `session_turns`、`steps`、`policies`、`context` 和 `answer`。
+
+恢复时不会重新执行旧工具调用，而是把旧 session 的 user/answer、最近 tool trace、policy intents 和 context metadata 压缩成一段背景上下文注入当前 session。恢复后下一次输入会带着这段历史继续对话；如果需要确认当前文件状态，模型仍应重新调用 file tools。
+
+Session 删除采用软删除：
+
+```text
+run log -> .minicode/runs/_deleted/
+memory  -> .minicode/memory/_archive/
+```
+
+关联 memory 的判断基于 `run_id`、`source_run_id`、`source_trace_ids` 和 `parent_memory_ids` 链路：直接 session memory、由该 session 沉淀出的长期 memory、以及 dreaming 后仍带有该 session 父链路的融合 memory 都会被一起归档。归档后的 memory 不再出现在 `/resume`、`search_memory` 和 active memory index 里。
 
 trace 示例：
 
