@@ -63,6 +63,7 @@ class RunLog:
     duration_ms: int = 0
     answer: str = ""
     skill_route: dict[str, Any] | None = None
+    policies: list[dict[str, Any]] = field(default_factory=list)
     context: dict[str, Any] = field(default_factory=dict)
     memory_trigger: dict[str, Any] | None = None
     memory_dreaming: dict[str, Any] | None = None

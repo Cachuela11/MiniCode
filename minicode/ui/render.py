@@ -128,6 +128,12 @@ class CliRenderer:
             skills = ", ".join(selected) if selected else "none"
             self._kv("skills", f"{skills} ({reranker})")
             return
+        if event.kind == "policy":
+            rules = event.data.get("rules") or []
+            required = event.data.get("required_first_action") or None
+            suffix = f", first={required.get('action')}" if isinstance(required, dict) and required else ""
+            self._kv("policy", f"{event.message}, rules={len(rules)}{suffix}")
+            return
         if event.kind == "context_compacted":
             after_chars = event.data.get("after_chars", "?")
             before_chars = event.data.get("before_chars", "?")

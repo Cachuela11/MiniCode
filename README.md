@@ -46,7 +46,7 @@ python -m minicode --chat "先看一下项目结构"
 
 - 基础命令：`/help`、`/status`、`/exit`、`/quit`。
 - 输入体验：优先使用 `prompt_toolkit` 保存历史到 `.minicode/chat-history.txt`，不可用时退回普通 `input()`。
-- 实时执行状态：`CodingSession.iter_turn()` 输出事件流，UI 会显示 turn、skill route、step、model action、tool result 和 context compaction。
+- 实时执行状态：`CodingSession.iter_turn()` 输出事件流，UI 会显示 turn、skill route、policy、step、model action、tool result 和 context compaction。
 - 等待反馈：模型调用和 tool 执行期间显示 spinner，并在完成后展示耗时。
 - 结构化 trace：按 `Turn` / `Step` 分块展示，区分 `model`、`tool`、`result`、`stdout/stderr preview`，不再把完整最终回答塞进 trace。
 - 结果分区：最终回答只显示在单独的 `Answer` 区块中。
@@ -57,6 +57,7 @@ trace 示例：
 ```text
 Turn 1
   skills  none (none)
+  policy  workspace_structure, rules=3, first=list_files
 
 Step 1
   model   list_files  tokens=1057, 6037ms
@@ -75,11 +76,10 @@ Step 2
 
 ```mermaid
 flowchart TD
-    A[User query] --> B[Build prompt with context and tool descriptions]
-    B --> P{Workspace inspection request?}
-    P -->|yes| Q[Inject mandatory first action<br/>model must return list_files]
-    P -->|no| C[LLM returns JSON action]
-    Q --> C
+    A[User query] --> R[Route skills]
+    R --> P[PolicyEngine.decide]
+    P --> B[Build prompt<br/>tools + context + skills + policy]
+    B --> C[LLM returns JSON action]
     C --> D{Decision}
     D -->|tool call| E[Execute tool]
     E --> F[Record step log]
@@ -102,10 +102,8 @@ flowchart TD
     F --> D
     E -->|/exit| G[Finalize one session run log]
     E -->|normal input| H[Route skills for this turn]
-    H --> P{Workspace inspection request?}
-    P -->|yes| Q[Inject mandatory first action<br/>model calls list_files]
-    P -->|no| I[Run iter_turn event stream]
-    Q --> I
+    H --> P[PolicyEngine.decide for this turn]
+    P --> I[Run iter_turn event stream]
     I --> J[Render spinner / model stream / step trace]
     J --> K[Render model action and tool result events]
     K --> L[Render final answer]
@@ -134,11 +132,64 @@ flowchart TD
     L --> Z
 ```
 
-第一张图是单任务 agent 主循环：用户任务进入后，MiniCode 构建 prompt，DeepSeek 返回一个 JSON action，系统执行对应 tool，并把 observation 再发回模型，直到模型返回 `finish` 或达到最大步数。
+第一张图是单任务 agent 主循环：用户任务进入后，MiniCode 先做 skill route 和 policy 决策，再构建 prompt；DeepSeek 返回一个 JSON action，系统执行对应 tool，并把 observation 再发回模型，直到模型返回 `finish` 或达到最大步数。
 
-第二张图是持续对话 session：外层 session loop 接收多次用户输入，每次输入内部仍然跑一段 agent loop；同一个 session 保留上下文，退出时统一写 session run log 和 memory。
+第二张图是持续对话 session：外层 session loop 接收多次用户输入，每个 turn 都会重新做 skill route 和 policy 决策；同一个 session 保留上下文，退出时统一写 session run log 和 memory。
 
 第三张图是 tool 执行路径：不是所有 tool 都走 Docker。文件类 tool 直接在本地 workspace 内执行路径校验和读写；`run_shell` / `run_tests` 才会进入 Docker sandbox；未来 API 类 tool 会走自己的 API 参数校验和权限策略。
+
+## 干预链路
+
+干预链路是模型调用前的一层 `Policy Layer`。它不是某个 tool 的硬编码 guard，也不是执行后再拦截模型；它会先读取当前 user query，生成本轮的结构化策略，然后把策略渲染进本轮 user message。
+
+```mermaid
+flowchart TD
+    A[User query / chat turn] --> B[PolicyEngine.decide]
+    B --> C{Intent}
+    C -->|workspace_structure| D[Required first action<br/>list_files]
+    C -->|workspace_inspection| E[Require file tools before answer]
+    C -->|code_change| F[Focused edit + consider tests]
+    C -->|test_or_debug| G[Prefer run_tests]
+    C -->|general| H[No extra directives]
+    D --> I[render_policy_prompt]
+    E --> I
+    F --> I
+    G --> I
+    H --> I
+    I --> J[Build user message]
+    J --> K[LLM action loop]
+    B --> L[Write run_log.policies]
+    B --> M[Emit UI policy event in chat]
+```
+
+当前实现位置：
+
+- `minicode/policy.py`：定义 `PolicyEngine`、`PolicyDecision`、`RequiredAction` 和 `render_policy_prompt()`。
+- `minicode/prompts.py`：构造 task / turn message 时注入 policy 文本。
+- `minicode/runtime.py`：单任务运行开始时生成一次 policy，并写入 `run_log.policies`。
+- `minicode/session.py`：交互式每个 turn 都生成一次 policy，并发送 `policy` UI event。
+- `minicode/ui/render.py`：在 trace 中显示本轮 policy，例如 `policy workspace_structure, rules=3, first=list_files`。
+
+第一版规则：
+
+- 项目结构 / 目录结构类请求：强制下一步先调用 `list_files`，即使 initial context 里已经有文件索引。
+- 工作区检查 / 分析类请求：要求先使用文件类 tools，不要只凭 memory 或 initial context 回答文件内容。
+- 代码修改类请求：要求聚焦本次修改；修改后如果有合适命令，应运行相关测试，或者说明为什么没跑。
+- 测试 / 调试类请求：优先使用 `run_tests`，只有 `run_tests` 不适合时才用 `run_shell`。
+
+模型实际看到的是本轮 user message 中的一段 `Policy directives for this turn`。例如项目结构请求会注入：
+
+```text
+Policy directives for this turn:
+- Detected intent: workspace_structure
+- Required first action:
+  {"action":"list_files","args":{"path":".","max_depth":2,"limit":200}}
+  Reason: The user asked about the current project or directory structure.
+- Rules:
+  - Call list_files as the next action before finish or any other action.
+  - Use fresh tool output even if Initial context already contains a file index.
+  - Do not invent files that were not returned by tools.
+```
 
 ## 项目文件架构
 
@@ -163,6 +214,7 @@ MiniCode/
     session.py
     action_parser.py
     prompts.py
+    policy.py
     llm.py
     tools.py
     sandbox.py
@@ -200,7 +252,12 @@ MiniCode/
 - `.gitignore`：忽略 `.minicode/`、Python 缓存和安装元数据。`.minicode/` 是本机持久运行数据目录，但默认不提交到 Git。
 - `minicode/__main__.py`：支持 `python -m minicode` 的入口文件，只负责转发到 CLI。
 - `minicode/cli.py`：命令行入口，解析参数，创建 `DeepSeekClient`、`DockerSandbox`、`CodingAgent`，并处理 `--check`、`--eval`、`--chat`、`--run-log` 等模式。
-- `minicode/agent.py`：agent 主循环和持续对话 session。`CodingAgent.run()` 负责单任务执行；`CodingSession` 负责多轮用户输入共享同一份 messages/context，`iter_turn()` 负责输出实时 UI events，并在 session 关闭时统一 finalize。
+- `minicode/agent.py`：`CodingAgent` 组装入口，负责持有 LLM、sandbox、tools、skill catalog、memory store 和运行配置。
+- `minicode/runtime.py`：单任务 agent loop。负责构造 prompt、执行 action/tool 循环、记录 step log，并在结束时 finalize。
+- `minicode/session.py`：持续对话 session。负责多轮用户输入共享同一份 messages/context，`iter_turn()` 输出实时 UI events，并在 session 关闭时统一 finalize。
+- `minicode/action_parser.py`：解析模型返回的 JSON action，并从 `finish` action 中提取最终回答。
+- `minicode/prompts.py`：构建 system prompt、单任务 user message 和多轮对话 turn message。
+- `minicode/policy.py`：统一干预链路。根据当前 user query 生成本轮策略，例如强制先 `list_files`、要求先查文件、修改后考虑测试等。
 - `minicode/llm.py`：DeepSeek API client。调用 OpenAI-compatible `/chat/completions`，返回模型内容、token 用量和耗时。
 - `minicode/tools.py`：Tool runtime。注册并执行当前支持的 tools，统一返回 `ToolResult`。
 - `minicode/sandbox.py`：Docker sandbox。负责把命令放进 Docker 的 `/workspace` 中执行，并收集 stdout、stderr、exit code、耗时和权限信息。
@@ -712,6 +769,8 @@ python -m minicode --run-log .minicode/my-runs "list files"
 - token 消耗
 - 运行耗时
 - 是否出现危险或无效命令
+
+每次单任务或每个 chat turn 还会在 `run_log.policies` 中记录本轮干预链路结果，包括识别出的 intent、命中的规则、是否存在 required first action。
 
 如果设置了 `--final-test-command`，最终测试结果也会写入 run log。
 

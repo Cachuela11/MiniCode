@@ -16,6 +16,7 @@ from .observability import (
     make_run_id,
     summarize_messages,
 )
+from .policy import PolicyEngine
 from .prompts import SYSTEM_PROMPT_TEMPLATE, build_task_message
 from .skills import render_skill_prompt
 
@@ -43,6 +44,8 @@ def run_agent(agent: CodingAgent, task: str) -> AgentResult:
     )
     skill_route = agent._route_skills(task)
     run_log.skill_route = skill_route.to_log_dict()
+    policy = PolicyEngine().decide(task)
+    run_log.policies.append({"scope": "task", **policy.to_log_dict()})
     if skill_route.rerank_token_usage:
         run_log.token_usage.add(
             TokenUsage(
@@ -75,7 +78,7 @@ def run_agent(agent: CodingAgent, task: str) -> AgentResult:
         },
         {
             "role": "user",
-            "content": build_task_message(task, build_initial_context(agent.sandbox)),
+            "content": build_task_message(task, build_initial_context(agent.sandbox), policy=policy),
         },
     ]
     transcript: list[dict[str, Any]] = []

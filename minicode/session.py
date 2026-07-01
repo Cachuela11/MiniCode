@@ -10,6 +10,7 @@ from .action_parser import parse_action as _parse_action
 from .context import ContextConfig, ContextManager, build_initial_context, render_context_layer_prompt
 from .llm import LLMStreamDelta, LLMStreamDone
 from .observability import FileSnapshot, RunLog, StepLog, Timer, TokenUsage, make_run_id, summarize_messages
+from .policy import PolicyEngine
 from .prompts import SYSTEM_PROMPT_TEMPLATE, build_turn_message
 from .skills import SkillRoute, render_skill_prompt
 
@@ -127,6 +128,14 @@ class CodingSession:
                     total_tokens=skill_route.rerank_token_usage.get("total_tokens", 0),
                 )
             )
+        policy = PolicyEngine().decide(user_message)
+        self.run_log.policies.append({"scope": "turn", "turn": turn, **policy.to_log_dict()})
+        yield SessionEvent(
+            kind="policy",
+            turn=turn,
+            message=policy.intent,
+            data=policy.to_log_dict(),
+        )
         self.messages.append(
             {
                 "role": "user",
@@ -134,6 +143,7 @@ class CodingSession:
                     turn=turn,
                     user_message=user_message,
                     skill_prompt=render_skill_prompt(skill_route),
+                    policy=policy,
                 ),
             }
         )
