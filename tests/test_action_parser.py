@@ -1,6 +1,6 @@
 import unittest
 
-from minicode.actions import extract_finish_answer, parse_action
+from minicode.action_parser import extract_finish_answer, parse_action
 
 
 class ParseActionTests(unittest.TestCase):

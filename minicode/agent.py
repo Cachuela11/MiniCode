@@ -5,9 +5,9 @@ from typing import Any, Protocol
 
 from .context import ContextManager
 from .dreaming import DreamingConfig, MemoryDreamer
-from .evolution import SelfEvolution
 from .llm import LLMResponse
 from .memory import FileMemoryStore
+from .memory_trigger import MemoryTrigger
 from .observability import (
     RunLog,
     TestResult,
@@ -90,7 +90,7 @@ class CodingAgent:
     def _finalize_run_log(self, run_log: RunLog, context_manager: ContextManager, run_timer: Timer) -> None:
         run_log.context = context_manager.to_log_dict()
         run_log.duration_ms = run_timer.elapsed_ms()
-        memory_result = SelfEvolution(
+        memory_result = MemoryTrigger(
             llm=self.llm,
             model=self.config.model,
             memory_store=self.memory_store,
@@ -98,7 +98,7 @@ class CodingAgent:
             min_confidence=self.config.memory_min_confidence,
             max_candidates=self.config.memory_max_candidates,
         ).on_run_complete(run_log)
-        run_log.memory_evolution = memory_result.to_log_dict()
+        run_log.memory_trigger = memory_result.to_log_dict()
         run_log.token_usage.add(memory_result.token_usage)
         dreaming_result = MemoryDreamer(
             llm=self.llm,

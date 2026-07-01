@@ -17,6 +17,17 @@ except ImportError:  # pragma: no cover - exercised only without optional UI dep
     Text = None
 
 
+MINICODE_LOGO_LINES = [
+    "█▄ ▄█ ▀▀█▀▀ █▄  █ ▀▀█▀▀ ▄████ ▄██▄  ████▄ █████",
+    "██▄██   █   ██▄ █   █   █     █  █  █   █ █",
+    "█ ▀ █   █   █ ▀▄█   █   █     █  █  █   █ ████",
+    "█   █   █   █  ██   █   █     █  █  █   █ █",
+    "█   █ ▄▄█▄▄ █   █ ▄▄█▄▄ ▀████ ▀██▀  ████▀ █████",
+]
+MINICODE_LOGO_WIDTH = max(len(line) for line in MINICODE_LOGO_LINES)
+MINICODE_LOGO = "\n".join(line.ljust(MINICODE_LOGO_WIDTH) for line in MINICODE_LOGO_LINES)
+
+
 class CliRenderer:
     def __init__(self) -> None:
         self.console = Console() if Console is not None else None
@@ -25,7 +36,19 @@ class CliRenderer:
         self._stream_chars = 0
 
     def banner(self, session: Any) -> None:
+        if self.console and Panel and Text:
+            content = Text()
+            content.append(_gradient_text(MINICODE_LOGO))
+            content.append("\n\nMiniCode interactive session", style="bold white")
+            content.append(f"\nmodel     {session.agent.config.model}", style="white")
+            content.append(f"\nworkspace {session.agent.sandbox.workspace}", style="white")
+            content.append(f"\nrun_id    {session.run_log.run_id}", style="white")
+            content.append("\n\n/help  /status  /exit", style="dim")
+            self.console.print(Panel(content, border_style="#38bdf8", padding=(1, 2)))
+            return
         lines = [
+            MINICODE_LOGO,
+            "",
             "MiniCode interactive session",
             f"model: {session.agent.config.model}",
             f"workspace: {session.agent.sandbox.workspace}",
@@ -33,9 +56,6 @@ class CliRenderer:
             "",
             "Commands: /help, /status, /exit",
         ]
-        if self.console and Panel:
-            self.console.print(Panel("\n".join(lines), title="MiniCode", border_style="cyan"))
-            return
         print("\n".join(lines))
 
     def help(self) -> None:
@@ -302,3 +322,42 @@ def _format_token_usage(value: dict[str, Any]) -> str:
     if prompt or completion:
         return f", tokens={prompt or 0}+{completion or 0}"
     return ""
+
+
+def _gradient_text(value: str) -> Any:
+    if Text is None:
+        return value
+    colors = [
+        (34, 211, 238),
+        (99, 102, 241),
+        (217, 70, 239),
+        (251, 146, 60),
+    ]
+    text = Text()
+    printable = [char for char in value if char != "\n"]
+    total = max(1, len(printable) - 1)
+    index = 0
+    for char in value:
+        if char == "\n":
+            text.append(char)
+            continue
+        color = _gradient_color(colors, index / total)
+        style = f"bold #{color[0]:02x}{color[1]:02x}{color[2]:02x}"
+        text.append(char, style=style)
+        index += 1
+    return text
+
+
+def _gradient_color(colors: list[tuple[int, int, int]], position: float) -> tuple[int, int, int]:
+    if position <= 0:
+        return colors[0]
+    if position >= 1:
+        return colors[-1]
+    scaled = position * (len(colors) - 1)
+    left = int(scaled)
+    right = min(left + 1, len(colors) - 1)
+    mix = scaled - left
+    return tuple(
+        int(colors[left][channel] + (colors[right][channel] - colors[left][channel]) * mix)
+        for channel in range(3)
+    )

@@ -8,7 +8,7 @@ MiniCode 是一个最小可运行的 coding agent 框架。当前阶段的目标
 - 可观测性：结构化 run log、token、耗时、权限决策、文件修改记录
 - Eval：内置一组简单任务，用来衡量后续 Skill、Memory、自我进化是否真的有效
 
-后续还会继续扩展 context、harness、memory、skills 和 self-evolution。
+后续还会继续扩展 context、harness、memory、skills 和 memory trigger。
 
 ## 运行要求
 
@@ -161,7 +161,7 @@ MiniCode/
     agent.py
     runtime.py
     session.py
-    actions.py
+    action_parser.py
     prompts.py
     llm.py
     tools.py
@@ -191,7 +191,7 @@ MiniCode/
       catalog.py
       router.py
       prompt.py
-    evolution.py
+    memory_trigger.py
 ```
 
 - `pyproject.toml`：Python 项目配置，定义包名、版本、Python 版本要求和 `minicode` 命令行入口。
@@ -220,7 +220,7 @@ MiniCode/
 - `minicode/skills/catalog.py`：管理已加载的 skill，提供按名称查询和枚举能力。
 - `minicode/skills/router.py`：Skill 路由入口。复用 `SkillToolRetriever` 做元信息粗召回和 DeepSeek 精排，再把 selected skills 转成 `SkillRoute`。
 - `minicode/skills/prompt.py`：把选中的 skill 渲染成 prompt 文本，注入给模型。
-- `minicode/evolution.py`：记忆沉淀触发器。当前实现“session 摘要 -> 规则信号初筛 -> DeepSeek 长期记忆分类 -> 写入 memory”。
+- `minicode/memory_trigger.py`：记忆沉淀触发器。当前实现“session 摘要 -> 规则信号初筛 -> DeepSeek 长期记忆分类 -> 写入 memory”。
 
 ## Skill 体系
 
@@ -416,7 +416,7 @@ flowchart TD
     F --> K[Update index.json]
     I --> K
     J --> K
-    K --> L[Write run_log.memory_evolution]
+    K --> L[Write run_log.memory_trigger]
     L --> M[Check dreaming triggers]
     M -->|hit| N[Deduplicate / consolidate memories]
     M -->|miss| O[Skip dreaming]
@@ -433,7 +433,7 @@ flowchart TD
 
 当前执行逻辑：
 
-- run 结束后，`SelfEvolution` 先生成一条本地 `session_memory` 摘要。
+- run 结束后，`MemoryTrigger` 先生成一条本地 `session_memory` 摘要。
 - `session_memory` 会先写入 `.minicode/memory/sessions/`，保证每次 run 都有可检索的情景记录。
 - 然后 MiniCode 只对这条 session 摘要做正则初筛，判断是否出现长期沉淀信号。
 - 规则信号来自 session 摘要里的任务、最终答案、修改文件、tool 使用、测试结果、危险/无效命令等。
@@ -441,7 +441,7 @@ flowchart TD
 - 如果命中长期信号，DeepSeek 只负责把 session 摘要精判并分类为 `project_memory`、`procedural_memory`、`experience_memory` 三类候选。
 - 在线沉淀阶段的原始 `session_memory` 始终由本地摘要生成；dreaming 阶段可以生成 `subtype=session_summary` 的压缩版 session memory。
 - 如果 DeepSeek 长期分类失败，已经写入的 `session_memory` 会保留，不会让主任务失败。
-- 记忆写入结果会记录到 run log 的 `memory_evolution` 字段。
+- 记忆写入结果会记录到 run log 的 `memory_trigger` 字段；`to_dict()` 会暂时保留兼容字段 `memory_evolution`。
 - 每条新 memory 会写入 `source_run_id`、`source_trace_ids`、`source_step_ids`、`source_tool_names`、`source_modified_files` 等来源字段。
 - dreaming 生成的 `session_summary` 和长期记忆都会通过 `parent_memory_ids` 指向来源 session，方便回查证据链。
 

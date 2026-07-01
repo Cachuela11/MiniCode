@@ -22,7 +22,7 @@ class MemorySignal:
 
 
 @dataclass
-class MemoryEvolutionResult:
+class MemoryTriggerResult:
     mode: str
     status: str
     signals: list[MemorySignal] = field(default_factory=list)
@@ -40,7 +40,7 @@ class ChatClient(Protocol):
         ...
 
 
-class SelfEvolution:
+class MemoryTrigger:
     """Run-level memory sedimentation trigger.
 
     Current online loop:
@@ -65,11 +65,11 @@ class SelfEvolution:
         self.max_candidates = max(1, min(max_candidates, 10))
         self.prefilter = RuleMemoryPrefilter()
 
-    def on_run_complete(self, run_log: RunLog) -> MemoryEvolutionResult:
+    def on_run_complete(self, run_log: RunLog) -> MemoryTriggerResult:
         if self.mode == "off":
-            return MemoryEvolutionResult(mode=self.mode, status="off")
+            return MemoryTriggerResult(mode=self.mode, status="off")
 
-        result = MemoryEvolutionResult(mode=self.mode, status="started")
+        result = MemoryTriggerResult(mode=self.mode, status="started")
         session_candidate = _session_candidate(run_log)
         try:
             session_write = self.memory_store.write_candidate(session_candidate)
@@ -129,6 +129,10 @@ class SelfEvolution:
         return result
 
 
+MemoryEvolutionResult = MemoryTriggerResult
+SelfEvolution = MemoryTrigger
+
+
 class RuleMemoryPrefilter:
     def collect(self, session_memory: MemoryCandidate) -> list[MemorySignal]:
         text = _normalize(
@@ -156,7 +160,7 @@ class RuleMemoryPrefilter:
                 r"\bpyproject\.toml\b",
                 r"\breadme\.md\b",
                 r"\.skills/",
-                r"minicode/(agent|context|memory|evolution|tools|cli)\.py",
+                r"minicode/(agent|context|memory|memory_trigger|tools|cli)\.py",
                 r"架构",
                 r"流程",
                 r"项目",
