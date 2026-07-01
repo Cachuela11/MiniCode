@@ -159,6 +159,10 @@ MiniCode/
     __init__.py
     cli.py
     agent.py
+    runtime.py
+    session.py
+    actions.py
+    prompts.py
     llm.py
     tools.py
     sandbox.py
