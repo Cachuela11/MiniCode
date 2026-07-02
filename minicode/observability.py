@@ -42,6 +42,7 @@ class StepLog:
     invalid_command: bool = False
     context_event: dict[str, Any] | None = None
     retrieval_trace: dict[str, Any] | None = None
+    prompt_injection_review: dict[str, Any] | None = None
 
 
 @dataclass

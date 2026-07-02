@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Iterator
 from .action_parser import extract_finish_answer as _extract_finish_answer
 from .action_parser import parse_action as _parse_action
 from .context import ContextConfig, ContextManager, build_initial_context, render_context_layer_prompt
+from .injection import protect_observation
 from .llm import LLMStreamDelta, LLMStreamDone
 from .observability import FileSnapshot, RunLog, StepLog, Timer, TokenUsage, make_run_id, summarize_messages
 from .policy import PolicyEngine
@@ -281,10 +282,23 @@ class CodingSession:
             )
             tool_result = self.agent.tools.execute(str(name), args)
             modified_files = self.file_snapshot.diff()
+            injection_review = self.agent.prompt_injection_classifier.classify(
+                tool_name=str(name),
+                text=tool_result.output,
+            )
+            self.run_log.token_usage.add(injection_review.token_usage)
+            yield SessionEvent(
+                kind="prompt_injection",
+                turn=turn,
+                step=step,
+                message=injection_review.level,
+                data=injection_review.to_log_dict(),
+            )
+            protected_output = protect_observation(tool_result.output, injection_review)
             context_event = self.context_manager.record_observation(
                 step=step,
                 tool_name=str(name),
-                output=tool_result.output,
+                output=protected_output,
                 exit_code=tool_result.exit_code,
                 modified_files=modified_files,
             )
@@ -308,6 +322,7 @@ class CodingSession:
                     invalid_command=tool_result.invalid_command,
                     context_event=context_event.to_log_dict(),
                     retrieval_trace=tool_result.retrieval_trace,
+                    prompt_injection_review=injection_review.to_log_dict(),
                 )
             )
             self.run_log.token_usage.add(llm_response.token_usage)

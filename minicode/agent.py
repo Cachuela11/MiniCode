@@ -5,6 +5,7 @@ from typing import Any, Protocol
 
 from .context import ContextManager
 from .dreaming import DreamingConfig, MemoryDreamer
+from .injection import PromptInjectionClassifier
 from .llm import LLMResponse
 from .memory import FileMemoryStore
 from .memory_trigger import MemoryTrigger
@@ -80,6 +81,7 @@ class CodingAgent:
         )
         self.tools.set_skill_catalog(self.skill_catalog)
         self.tools.set_memory_store(self.memory_store)
+        self.prompt_injection_classifier = PromptInjectionClassifier(llm=self.llm, model=self.config.model)
 
     def start_session(self) -> "CodingSession":
         return CodingSession(self)

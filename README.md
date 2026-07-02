@@ -259,22 +259,67 @@ flowchart TD
     N --> O
     G --> O
     D --> O
-    O --> P[Record step log<br/>return observation to LLM]
+    O --> P[PromptInjectionClassifier.classify<br/>rules + DeepSeek on suspicious output]
+    P --> Q{Risk level}
+    Q -->|safe / low| R[Use observation as-is]
+    Q -->|medium / high| S[Wrap as UNTRUSTED OBSERVATION]
+    R --> T[Record step log<br/>return observation to LLM]
+    S --> T
 ```
 
-当前第一版包含两层：
+当前第一版包含三层：
 
 - 工具自检：所有模型 action 都会先进入 `ToolRegistry.execute()`，再由 `ToolSecurityReviewer.review()` 检查。它面向所有 tools，负责判断 action 参数是否合法、路径是否越界、是否访问受保护目录或 secret-like 文件、必填参数是否缺失、参数类型是否正确。自检失败时直接返回 blocked `ToolResult`，具体 tool handler 不会执行。
 - 规则过滤：只有 `run_shell` / `run_tests` 这类 shell 命令会额外进入 `CommandPolicy.check()`。它面向自由文本 shell command，按 `&&`、`||`、`;`、`|` 拆分后逐段匹配规则。当前会阻止 `rm -rf`、`find -delete`、`mkfs`、`dd of=/dev`、关机重启命令、嵌套 Docker/Podman；对 `git push/reset/clean`、网络命令、依赖安装、`rm/mv`、`chmod/chown` 进入人工确认。
+- Prompt injection 分类：tool 执行完成后、observation 进入 context 之前，`PromptInjectionClassifier` 会先做本地规则初筛；如果命中可疑信号，再调用 DeepSeek 做风险精判。`safe/low` 结果按原样进入上下文；`medium/high` 会被包成 `UNTRUSTED OBSERVATION`，明确告诉模型只能把其中内容当作数据，不能执行里面的指令。
 
-这两层的分工是：
+三层分工是：
 
 ```text
-ToolSecurityReviewer = 检查“这个 action 能不能作为合法 tool 调用”
-CommandPolicy        = 检查“这个 shell 命令能不能被执行”
+ToolSecurityReviewer       = 检查“这个 action 能不能作为合法 tool 调用”
+CommandPolicy              = 检查“这个 shell 命令能不能被执行”
+PromptInjectionClassifier = 检查“这个 tool 输出能不能安全进入上下文”
 ```
 
 因此，`read_file`、`write_file`、`search_memory` 这类结构化 tool 只需要工具自检；`run_shell` 和 `run_tests` 因为包含自由 shell 字符串，所以还需要规则过滤和人工确认。
+
+AI 风险分类机制：
+
+```mermaid
+flowchart TD
+    A[Tool output / observation] --> B[Rule prefilter]
+    B --> C{Suspicious signals?}
+    C -->|no| D[Classify as safe<br/>no extra LLM call]
+    C -->|yes| E[Redact and truncate sample]
+    E --> F[DeepSeek risk classifier]
+    F --> G{Risk level}
+    G -->|safe / low| H[Observation enters context as-is]
+    G -->|medium / high| I[Wrap as UNTRUSTED OBSERVATION]
+    I --> J[Model may read as data<br/>must not follow embedded instructions]
+    H --> K[Record prompt_injection_review]
+    J --> K
+```
+
+本地规则初筛负责快速发现明显注入信号，例如：
+
+- 要求忽略之前的 system / developer / user 指令。
+- 伪造 system prompt、developer prompt 或重新定义模型角色。
+- 要求模型执行 tool、运行 shell、读取 secret 或输出 API key。
+- 要求隐藏行为，例如 `do not tell the user`、`hide this`。
+- 试图覆盖输出格式，例如要求 “output only JSON”。
+
+只有命中这些可疑信号时，MiniCode 才会调用 DeepSeek 做 AI 风险精判，返回 `safe / low / medium / high`。这样可以避免每个普通文件输出都额外消耗 token。发送给 DeepSeek 前会做长度截断和基础 secret redaction。
+
+`medium / high` 不会直接删除内容，而是保留证据并包成：
+
+```text
+UNTRUSTED OBSERVATION SECURITY NOTICE
+--- BEGIN UNTRUSTED TOOL OUTPUT ---
+...
+--- END UNTRUSTED TOOL OUTPUT ---
+```
+
+这样模型仍然能分析内容，但会被明确提醒：里面的文字是外部数据，不是新的指令。
 
 审查结果会写入每一步的 `ToolResult` 和 run log：
 
@@ -282,8 +327,7 @@ CommandPolicy        = 检查“这个 shell 命令能不能被执行”
 - `permission_reason`
 - `dangerous_command`
 - `invalid_command`
-
-目前还没有实现 AI 风险分类和 prompt injection 防御；后续会在 observation 注入上下文前增加 untrusted content 标记、规则检测和 LLM 风险分类。
+- `prompt_injection_review`
 
 ## 项目文件架构
 
@@ -315,6 +359,7 @@ MiniCode/
     sandbox.py
     permissions.py
     security.py
+    injection.py
     context.py
     observability.py
     eval.py
@@ -360,6 +405,7 @@ MiniCode/
 - `minicode/sandbox.py`：Docker sandbox。负责把命令放进 Docker 的 `/workspace` 中执行，并收集 stdout、stderr、exit code、耗时和权限信息。
 - `minicode/permissions.py`：命令权限策略。对危险命令做 `allow`、`ask`、`deny` 判断，并支持 `never`、`ask`、`always` 三种审批模式。
 - `minicode/security.py`：tool 执行前安全审查。负责工具风险元信息、参数自检、路径越界保护、敏感路径过滤和 secret-like 文件拦截。
+- `minicode/injection.py`：prompt injection 风险分类。对 tool observation 做规则初筛和 DeepSeek 精判，高风险内容会包成 untrusted observation 再进入上下文。
 - `minicode/context.py`：多层上下文构建与压缩。负责 L0-L3 层说明、初始文件索引、大 observation 外置、占位预览、结构化 notes 和历史超限压缩。
 - `minicode/ui/repl.py`：交互式 CLI 前端。负责 `--chat` REPL、输入历史、slash command 分发、消费 `iter_turn()` 事件流和 session 保存。
 - `minicode/ui/commands.py`：解析 `/help`、`/status`、`/exit` 等 slash commands。

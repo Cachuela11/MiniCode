@@ -214,6 +214,13 @@ class CliRenderer:
             self._stop_status()
             self._tool_result(event)
             return
+        if event.kind == "prompt_injection":
+            self._stop_status()
+            level = event.message
+            if level not in {"safe", "low"}:
+                reason = event.data.get("reason") or ""
+                self._kv("risk", f"prompt-injection {level}: {_text_preview(str(reason), limit=90)}")
+            return
         if event.kind == "turn_finish":
             self._stop_status()
             return

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from .action_parser import extract_finish_answer, parse_action
 from .context import ContextConfig, ContextManager, build_initial_context, render_context_layer_prompt
+from .injection import protect_observation
 from .observability import (
     FileSnapshot,
     RunLog,
@@ -129,10 +130,16 @@ def run_agent(agent: CodingAgent, task: str) -> AgentResult:
 
         tool_result = agent.tools.execute(str(name), args)
         modified_files = file_snapshot.diff()
+        injection_review = agent.prompt_injection_classifier.classify(
+            tool_name=str(name),
+            text=tool_result.output,
+        )
+        run_log.token_usage.add(injection_review.token_usage)
+        protected_output = protect_observation(tool_result.output, injection_review)
         context_event = context_manager.record_observation(
             step=step,
             tool_name=str(name),
-            output=tool_result.output,
+            output=protected_output,
             exit_code=tool_result.exit_code,
             modified_files=modified_files,
         )
@@ -156,6 +163,7 @@ def run_agent(agent: CodingAgent, task: str) -> AgentResult:
                 invalid_command=tool_result.invalid_command,
                 context_event=context_event.to_log_dict(),
                 retrieval_trace=tool_result.retrieval_trace,
+                prompt_injection_review=injection_review.to_log_dict(),
             )
         )
         run_log.token_usage.add(llm_response.token_usage)
