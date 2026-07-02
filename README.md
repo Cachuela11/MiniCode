@@ -240,27 +240,41 @@ Policy directives for this turn:
 ```mermaid
 flowchart TD
     A[LLM JSON action] --> B[ToolRegistry.execute]
-    B --> C[ToolSecurityReviewer.review]
-    C --> D{Security decision}
-    D -->|deny| E[Return blocked ToolResult<br/>no handler execution]
-    D -->|allow| F[Run tool handler]
-    F --> G{Shell or tests?}
-    G -->|yes| H[DockerSandbox.run]
-    H --> I[CommandPolicy.check<br/>segment-level rules]
-    I -->|deny| J[Blocked before Docker command]
-    I -->|ask| K[ApprovalProvider<br/>never / ask / always]
-    I -->|allow| L[Execute in Docker /workspace]
-    G -->|no| M[Structured tool completes]
-    J --> N[Step log records decision]
-    K --> N
-    L --> N
-    M --> N
+    B --> C{Tool exists?}
+    C -->|no| D[Return invalid ToolResult]
+    C -->|yes| E[ToolSecurityReviewer.review<br/>all actions / all tools]
+    E --> F{Tool self-check}
+    F -->|deny| G[Return blocked ToolResult<br/>handler is not executed]
+    F -->|allow| H{Tool type}
+    H -->|structured tool| I[Run structured handler<br/>file / retrieval / context]
+    H -->|run_shell / run_tests| J[DockerSandbox.run]
+    J --> K[CommandPolicy.check<br/>shell segment rule filtering]
+    K -->|deny| L[Block before Docker command]
+    K -->|ask| M[ApprovalProvider<br/>never / ask / always]
+    M -->|rejected| L
+    M -->|approved| N[Execute in Docker /workspace]
+    K -->|allow| N
+    I --> O[Build ToolResult]
+    L --> O
+    N --> O
+    G --> O
+    D --> O
+    O --> P[Record step log<br/>return observation to LLM]
 ```
 
 当前第一版包含两层：
 
-- 规则过滤：`CommandPolicy` 会对 shell 命令做分段审查，按 `&&`、`||`、`;`、`|` 拆分后逐段匹配规则。当前会阻止 `rm -rf`、`find -delete`、`mkfs`、`dd of=/dev`、关机重启命令、嵌套 Docker/Podman；对 `git push/reset/clean`、网络命令、依赖安装、`rm/mv`、`chmod/chown` 进入人工确认。
-- 工具自检：`ToolSecurityReviewer` 会在 tool handler 执行前检查 action 参数。当前会校验 args 必须是 JSON object、路径不能逃出 workspace、禁止访问 `.git`、禁止读取/写入 secret-like 文件（如 `.env`、私钥、`.pem`、`.key`）、校验 `write_file.content` 类型、校验 `read_context_artifact` 的 artifact id、校验检索类 tool 的必填参数。
+- 工具自检：所有模型 action 都会先进入 `ToolRegistry.execute()`，再由 `ToolSecurityReviewer.review()` 检查。它面向所有 tools，负责判断 action 参数是否合法、路径是否越界、是否访问受保护目录或 secret-like 文件、必填参数是否缺失、参数类型是否正确。自检失败时直接返回 blocked `ToolResult`，具体 tool handler 不会执行。
+- 规则过滤：只有 `run_shell` / `run_tests` 这类 shell 命令会额外进入 `CommandPolicy.check()`。它面向自由文本 shell command，按 `&&`、`||`、`;`、`|` 拆分后逐段匹配规则。当前会阻止 `rm -rf`、`find -delete`、`mkfs`、`dd of=/dev`、关机重启命令、嵌套 Docker/Podman；对 `git push/reset/clean`、网络命令、依赖安装、`rm/mv`、`chmod/chown` 进入人工确认。
+
+这两层的分工是：
+
+```text
+ToolSecurityReviewer = 检查“这个 action 能不能作为合法 tool 调用”
+CommandPolicy        = 检查“这个 shell 命令能不能被执行”
+```
+
+因此，`read_file`、`write_file`、`search_memory` 这类结构化 tool 只需要工具自检；`run_shell` 和 `run_tests` 因为包含自由 shell 字符串，所以还需要规则过滤和人工确认。
 
 审查结果会写入每一步的 `ToolResult` 和 run log：
 
