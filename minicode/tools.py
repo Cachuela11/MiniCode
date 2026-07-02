@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
 from .memory import FileMemoryStore, NullMemory
+from .permissions import Decision
 from .retrieval.memory import MemoryToolRetriever
 from .retrieval.skill import SkillToolRetriever
 from .sandbox import DockerSandbox, SandboxResult
+from .security import ToolSecurityReviewer
 from .skills import SkillCatalog
 
 
@@ -50,6 +52,7 @@ class ToolRegistry:
         self.llm = llm
         self.model = model
         self.skill_recall_k = max(0, skill_recall_k)
+        self.security = ToolSecurityReviewer(self.workspace)
         self._tools: dict[str, ToolHandler] = {
             "run_shell": self._run_shell,
             "list_files": self._list_files,
@@ -103,11 +106,32 @@ class ToolRegistry:
                 exit_code=127,
                 invalid_command=True,
             )
+        review = self.security.review(name, args)
+        if review.decision == Decision.DENY:
+            message = f"ERROR: tool blocked by security review: {review.reason}"
+            return ToolResult(
+                False,
+                message,
+                stderr=message,
+                exit_code=126 if review.dangerous else 2,
+                permission_decision=review.decision.value,
+                permission_reason=review.reason,
+                dangerous_command=review.dangerous,
+                invalid_command=review.invalid,
+            )
         try:
-            return handler(args)
+            result = handler(args)
         except Exception as exc:
             message = f"ERROR: {exc}"
             return ToolResult(False, message, stderr=message, exit_code=1)
+        if result.permission_decision == "not_applicable":
+            return replace(
+                result,
+                permission_decision=review.decision.value,
+                permission_reason=review.reason,
+                dangerous_command=result.dangerous_command or review.dangerous,
+            )
+        return result
 
     def _run_shell(self, args: dict[str, Any]) -> ToolResult:
         command = str(args.get("command", "")).strip()

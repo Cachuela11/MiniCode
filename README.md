@@ -233,6 +233,44 @@ Policy directives for this turn:
   - Do not invent files that were not returned by tools.
 ```
 
+## 权限与安全审查
+
+安全审查发生在模型生成 JSON action 之后、tool 真正执行之前。它和 harness 不是一回事：这里是 runtime 的安全治理层；harness 后续可以用来测试这些安全策略是否有效。
+
+```mermaid
+flowchart TD
+    A[LLM JSON action] --> B[ToolRegistry.execute]
+    B --> C[ToolSecurityReviewer.review]
+    C --> D{Security decision}
+    D -->|deny| E[Return blocked ToolResult<br/>no handler execution]
+    D -->|allow| F[Run tool handler]
+    F --> G{Shell or tests?}
+    G -->|yes| H[DockerSandbox.run]
+    H --> I[CommandPolicy.check<br/>segment-level rules]
+    I -->|deny| J[Blocked before Docker command]
+    I -->|ask| K[ApprovalProvider<br/>never / ask / always]
+    I -->|allow| L[Execute in Docker /workspace]
+    G -->|no| M[Structured tool completes]
+    J --> N[Step log records decision]
+    K --> N
+    L --> N
+    M --> N
+```
+
+当前第一版包含两层：
+
+- 规则过滤：`CommandPolicy` 会对 shell 命令做分段审查，按 `&&`、`||`、`;`、`|` 拆分后逐段匹配规则。当前会阻止 `rm -rf`、`find -delete`、`mkfs`、`dd of=/dev`、关机重启命令、嵌套 Docker/Podman；对 `git push/reset/clean`、网络命令、依赖安装、`rm/mv`、`chmod/chown` 进入人工确认。
+- 工具自检：`ToolSecurityReviewer` 会在 tool handler 执行前检查 action 参数。当前会校验 args 必须是 JSON object、路径不能逃出 workspace、禁止访问 `.git`、禁止读取/写入 secret-like 文件（如 `.env`、私钥、`.pem`、`.key`）、校验 `write_file.content` 类型、校验 `read_context_artifact` 的 artifact id、校验检索类 tool 的必填参数。
+
+审查结果会写入每一步的 `ToolResult` 和 run log：
+
+- `permission_decision`
+- `permission_reason`
+- `dangerous_command`
+- `invalid_command`
+
+目前还没有实现 AI 风险分类和 prompt injection 防御；后续会在 observation 注入上下文前增加 untrusted content 标记、规则检测和 LLM 风险分类。
+
 ## 项目文件架构
 
 ```text
@@ -262,6 +300,7 @@ MiniCode/
     tools.py
     sandbox.py
     permissions.py
+    security.py
     context.py
     observability.py
     eval.py
@@ -306,6 +345,7 @@ MiniCode/
 - `minicode/tools.py`：Tool runtime。注册并执行当前支持的 tools，统一返回 `ToolResult`。
 - `minicode/sandbox.py`：Docker sandbox。负责把命令放进 Docker 的 `/workspace` 中执行，并收集 stdout、stderr、exit code、耗时和权限信息。
 - `minicode/permissions.py`：命令权限策略。对危险命令做 `allow`、`ask`、`deny` 判断，并支持 `never`、`ask`、`always` 三种审批模式。
+- `minicode/security.py`：tool 执行前安全审查。负责工具风险元信息、参数自检、路径越界保护、敏感路径过滤和 secret-like 文件拦截。
 - `minicode/context.py`：多层上下文构建与压缩。负责 L0-L3 层说明、初始文件索引、大 observation 外置、占位预览、结构化 notes 和历史超限压缩。
 - `minicode/ui/repl.py`：交互式 CLI 前端。负责 `--chat` REPL、输入历史、slash command 分发、消费 `iter_turn()` 事件流和 session 保存。
 - `minicode/ui/commands.py`：解析 `/help`、`/status`、`/exit` 等 slash commands。
