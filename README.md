@@ -254,7 +254,7 @@ flowchart TD
 ```powershell
 python -m minicode --subagents auto "review 当前项目的 runtime 设计"
 python -m minicode --subagents on "强制使用 subagent 并行调查这个问题"
-python -m minicode --subagents off "按默认单 agent 模式执行"
+python -m minicode --subagents off "默认单 agent 模式执行"
 python -m minicode --chat --subagents auto
 ```
 
