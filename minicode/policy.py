@@ -30,7 +30,7 @@ class PolicyDecision:
 class PolicyEngine:
     """Builds turn-level intervention directives before the model is called."""
 
-    def decide(self, user_message: str) -> PolicyDecision:
+    def decide(self, user_message: str, task_mode: Any | None = None) -> PolicyDecision:
         text = _normalize(user_message)
         rules: list[str] = []
         hints: list[str] = []
@@ -75,6 +75,25 @@ class PolicyEngine:
         if _matches(text, TEST_TERMS):
             intent = "test_or_debug" if intent == "general" else intent
             rules.append("Prefer run_tests for test commands; use run_shell only when run_tests is not suitable.")
+
+        if getattr(task_mode, "use_subagents", False):
+            intent = "subagent_assisted" if intent == "general" else intent
+            tasks = [
+                task.to_action_args() if hasattr(task, "to_action_args") else asdict(task)
+                for task in getattr(task_mode, "tasks", [])
+            ]
+            required = RequiredAction(
+                action="run_subagents",
+                args={"tasks": tasks, "max_parallel": min(4, max(1, len(tasks)))},
+                reason=getattr(task_mode, "reason", "") or "Task was classified as complex enough for parallel read-only investigation.",
+            )
+            rules.extend(
+                [
+                    "Call run_subagents as the next action before finish or other investigative tools.",
+                    "Use the subagent reports as evidence, then keep final decisions, edits, tests, and user-facing answers in the main agent.",
+                    "Do not ask subagents to write files, run shell commands, run tests, or spawn other subagents.",
+                ]
+            )
 
         return PolicyDecision(
             intent=intent,

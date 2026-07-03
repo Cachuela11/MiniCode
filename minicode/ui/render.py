@@ -167,6 +167,16 @@ class CliRenderer:
             skills = ", ".join(selected) if selected else "none"
             self._kv("skills", f"{skills} ({reranker})")
             return
+        if event.kind == "task_mode":
+            source = event.data.get("source") or "none"
+            reason = event.data.get("reason") or ""
+            tasks = event.data.get("tasks") or []
+            suffix = f", tasks={len(tasks)}" if tasks else ""
+            detail = f"{event.message} ({source}{suffix})"
+            if reason:
+                detail += f": {_text_preview(str(reason), limit=80)}"
+            self._kv("mode", detail)
+            return
         if event.kind == "policy":
             rules = event.data.get("rules") or []
             required = event.data.get("required_first_action") or None

@@ -81,6 +81,12 @@ def main(argv: list[str] | None = None) -> int:
         default=int(os.getenv("MINICODE_MAX_STEPS", "8")),
     )
     parser.add_argument(
+        "--subagents",
+        choices=["off", "auto", "on"],
+        default=os.getenv("MINICODE_SUBAGENTS", "auto"),
+        help="Subagent mode: off disables it, auto lets the model classify task complexity, on forces it.",
+    )
+    parser.add_argument(
         "--transcript",
         help="Optional path to write the agent transcript JSON.",
     )
@@ -387,6 +393,7 @@ def _build_agent(args, llm, sandbox: DockerSandbox, skill_catalog: SkillCatalog)
             dreaming_min_confidence=args.dream_min_confidence,
             dreaming_session_hot_days=args.dream_session_hot_days,
             stream_model_responses=not args.no_stream,
+            subagent_mode=args.subagents,
         ),
         skill_catalog=skill_catalog,
     )

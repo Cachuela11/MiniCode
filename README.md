@@ -182,31 +182,49 @@ flowchart TD
 
 ## 中心化多 Agent 协作
 
-当前第一版采用 `subagent as tool`：主 Agent 不移交控制权，子 Agent 只是 `run_subagents` 这个 tool 内部的受控执行单元。
+当前第一版采用 `subagent as tool`：主 Agent 不移交控制权，子 Agent 只是 `run_subagents` 这个 tool 内部的受控执行单元。启动方式支持三种：`--subagents auto`、`--subagents on`、`--subagents off`。
 
 ```mermaid
 flowchart TD
-    A[Main Agent loop] --> B[LLM action: run_subagents]
-    B --> C[Tool self-check<br/>validate tasks / forbidden tools / path scope]
-    C --> D[SubAgentRunner]
-    D --> E1[SubAgent A<br/>isolated messages]
-    D --> E2[SubAgent B<br/>isolated messages]
-    D --> E3[SubAgent N<br/>isolated messages]
-    E1 --> F[ScopedToolExecutor<br/>read-only tools + path boundary]
-    E2 --> F
-    E3 --> F
-    F --> G[Collect compact reports]
-    G --> H[Return one observation<br/>to Main Agent]
-    H --> I[Main Agent decides next action]
+    A[User query / chat turn] --> B[TaskModeRouter]
+    B --> C{Mode}
+    C -->|off| D[Default agent mode]
+    C -->|on| E[Force subagent mode]
+    C -->|auto| F[DeepSeek complexity classifier]
+    F -->|simple| D
+    F -->|complex + task plan| E
+    E --> G[Policy required_first_action<br/>run_subagents]
+    D --> H[Normal PolicyEngine directives]
+    G --> I[Main Agent loop]
+    H --> I
+    I --> J[LLM action]
+    J --> K[ToolRegistry.execute]
+    K --> L[run_subagents]
+    L --> M[SubAgentRunner parallel workers]
+    M --> N[ScopedToolExecutor<br/>read-only tools + path boundary]
+    N --> O[Compact subagent reports]
+    O --> P[Observation back to Main Agent]
+    P --> Q[Main Agent decides next action]
 ```
 
 设计边界：
 
+- `auto` 模式会在每个单任务 run 或 chat turn 开始前先做一次任务复杂度判断；简单任务走默认 agent，复杂任务把 `run_subagents` 注入为本轮 required first action。
+- `on` 模式跳过复杂度判断，直接强制 subagent 模式；`off` 模式完全关闭自动 subagent 干预，但模型仍能看到 `run_subagents` tool。
 - 主 Agent 仍然负责规划、审批、文件修改、测试、最终回答和质量控制。
 - 子 Agent 默认只允许只读工具：`list_files`、`read_file`、`grep_files`、`search_skills`、`load_skill`、`search_memory`、`load_memory`。
 - 第一版禁止子 Agent 使用 `write_file`、`run_shell`、`run_tests`、`run_subagents`，避免并行写文件、shell 副作用和递归调度。
 - 每个子任务都有独立 `allowed_tools`、`path_scope` 和 `max_steps`，子 Agent 访问文件时必须落在自己的路径边界内。
 - `run_subagents` 返回给主 Agent 的是压缩报告；完整子步骤写入 run log 的 `subagent_trace`，用于审计和调试。
+
+运行方式：
+
+```powershell
+python -m minicode --subagents auto "review 当前项目的 runtime 设计"
+python -m minicode --subagents on "强制使用 subagent 并行调查这个问题"
+python -m minicode --subagents off "按默认单 agent 模式执行"
+python -m minicode --chat --subagents auto
+```
 
 示例 action：
 
@@ -241,17 +259,20 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[User query / chat turn] --> B[PolicyEngine.decide]
+    A[User query / chat turn] --> T[TaskModeRouter<br/>off / auto / on]
+    T --> B[PolicyEngine.decide]
     B --> C{Intent}
     C -->|workspace_structure| D[Required first action<br/>list_files]
     C -->|workspace_inspection| E[Require file tools before answer]
     C -->|code_change| F[Focused edit + consider tests]
     C -->|test_or_debug| G[Prefer run_tests]
+    C -->|subagent_assisted| S[Required first action<br/>run_subagents]
     C -->|general| H[No extra directives]
     D --> I[render_policy_prompt]
     E --> I
     F --> I
     G --> I
+    S --> I
     H --> I
     I --> J[Build user message]
     J --> K[LLM action loop]
@@ -262,6 +283,7 @@ flowchart TD
 当前实现位置：
 
 - `minicode/policy.py`：定义 `PolicyEngine`、`PolicyDecision`、`RequiredAction` 和 `render_policy_prompt()`。
+- `minicode/task_mode.py`：在 policy 之前做任务模式判断，`auto` 会调用 DeepSeek 判断复杂度，`on` 会强制生成 subagent 子任务。
 - `minicode/prompts.py`：构造 task / turn message 时注入 policy 文本。
 - `minicode/runtime.py`：单任务运行开始时生成一次 policy，并写入 `run_log.policies`。
 - `minicode/session.py`：交互式每个 turn 都生成一次 policy，并发送 `policy` UI event。
@@ -273,6 +295,7 @@ flowchart TD
 - 工作区检查 / 分析类请求：要求先使用文件类 tools，不要只凭 memory 或 initial context 回答文件内容。
 - 代码修改类请求：要求聚焦本次修改；修改后如果有合适命令，应运行相关测试，或者说明为什么没跑。
 - 测试 / 调试类请求：优先使用 `run_tests`，只有 `run_tests` 不适合时才用 `run_shell`。
+- 复杂任务且 subagent 模式命中：强制下一步先调用 `run_subagents`，并由主 Agent 继续负责后续修改、测试和最终回答。
 
 模型实际看到的是本轮 user message 中的一段 `Policy directives for this turn`。例如项目结构请求会注入：
 
@@ -409,6 +432,7 @@ MiniCode/
     action_parser.py
     prompts.py
     policy.py
+    task_mode.py
     resume.py
     llm.py
     tools.py
@@ -457,6 +481,7 @@ MiniCode/
 - `minicode/action_parser.py`：解析模型返回的 JSON action，并从 `finish` action 中提取最终回答。
 - `minicode/prompts.py`：构建 system prompt、单任务 user message 和多轮对话 turn message。
 - `minicode/policy.py`：统一干预链路。根据当前 user query 生成本轮策略，例如强制先 `list_files`、要求先查文件、修改后考虑测试等。
+- `minicode/task_mode.py`：任务模式路由。根据 `--subagents off/auto/on` 决定是否为复杂 query 自动或手动启用 subagent 模式，并生成子任务草案。
 - `minicode/resume.py`：历史对话恢复。负责定位 run log、读取 JSON，并把历史 session 压缩成可注入当前上下文的 resume context。
 - `minicode/llm.py`：DeepSeek API client。调用 OpenAI-compatible `/chat/completions`，返回模型内容、token 用量和耗时。
 - `minicode/tools.py`：Tool runtime。注册并执行当前支持的 tools，统一返回 `ToolResult`。
@@ -928,6 +953,7 @@ flowchart TD
 - `MINICODE_WORKSPACE`：挂载到 Docker 的 workspace，默认当前目录
 - `MINICODE_DOCKER_IMAGE`：sandbox 镜像，默认 `python:3.12-slim`
 - `MINICODE_MAX_STEPS`：agent 最大循环步数，默认 `8`
+- `MINICODE_SUBAGENTS`：subagent 模式，`off` / `auto` / `on`，CLI 默认 `auto`
 - `MINICODE_APPROVAL`：风险命令审批模式，默认 `never`
 - `MINICODE_RUN_LOG`：结构化运行日志输出目录或文件路径，默认 `.minicode/runs`
 - `MINICODE_FINAL_TEST_COMMAND`：agent 结束后运行的最终测试命令

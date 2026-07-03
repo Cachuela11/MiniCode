@@ -15,6 +15,7 @@ from .policy import PolicyEngine
 from .prompts import SYSTEM_PROMPT_TEMPLATE, build_turn_message
 from .resume import ResumeResult
 from .skills import SkillRoute, render_skill_prompt
+from .task_mode import TaskModeRouter
 
 if TYPE_CHECKING:
     from .agent import CodingAgent
@@ -151,8 +152,27 @@ class CodingSession:
                     total_tokens=skill_route.rerank_token_usage.get("total_tokens", 0),
                 )
             )
-        policy = PolicyEngine().decide(user_message)
-        self.run_log.policies.append({"scope": "turn", "turn": turn, **policy.to_log_dict()})
+        task_mode = TaskModeRouter(
+            llm=self.agent.llm,
+            model=self.agent.config.model,
+            mode=self.agent.config.subagent_mode,
+        ).decide(user_message)
+        self.run_log.token_usage.add(task_mode.token_usage)
+        yield SessionEvent(
+            kind="task_mode",
+            turn=turn,
+            message=task_mode.mode,
+            data=task_mode.to_log_dict(),
+        )
+        policy = PolicyEngine().decide(user_message, task_mode=task_mode)
+        self.run_log.policies.append(
+            {
+                "scope": "turn",
+                "turn": turn,
+                "task_mode": task_mode.to_log_dict(),
+                **policy.to_log_dict(),
+            }
+        )
         yield SessionEvent(
             kind="policy",
             turn=turn,

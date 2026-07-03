@@ -49,6 +49,7 @@ class AgentConfig:
     dreaming_min_confidence: float = 0.75
     dreaming_session_hot_days: float = 2.0
     stream_model_responses: bool = True
+    subagent_mode: str = "off"
 
 
 class ChatClient(Protocol):

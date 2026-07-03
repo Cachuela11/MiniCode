@@ -20,6 +20,7 @@ from .observability import (
 from .policy import PolicyEngine
 from .prompts import SYSTEM_PROMPT_TEMPLATE, build_task_message
 from .skills import render_skill_prompt
+from .task_mode import TaskModeRouter
 
 if TYPE_CHECKING:
     from .agent import CodingAgent
@@ -45,8 +46,20 @@ def run_agent(agent: CodingAgent, task: str) -> AgentResult:
     )
     skill_route = agent._route_skills(task)
     run_log.skill_route = skill_route.to_log_dict()
-    policy = PolicyEngine().decide(task)
-    run_log.policies.append({"scope": "task", **policy.to_log_dict()})
+    task_mode = TaskModeRouter(
+        llm=agent.llm,
+        model=agent.config.model,
+        mode=agent.config.subagent_mode,
+    ).decide(task)
+    run_log.token_usage.add(task_mode.token_usage)
+    policy = PolicyEngine().decide(task, task_mode=task_mode)
+    run_log.policies.append(
+        {
+            "scope": "task",
+            "task_mode": task_mode.to_log_dict(),
+            **policy.to_log_dict(),
+        }
+    )
     if skill_route.rerank_token_usage:
         run_log.token_usage.add(
             TokenUsage(
