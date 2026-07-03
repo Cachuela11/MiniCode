@@ -180,6 +180,61 @@ flowchart TD
 
 第三张图是 tool 执行路径：不是所有 tool 都走 Docker。文件类 tool 直接在本地 workspace 内执行路径校验和读写；`run_shell` / `run_tests` 才会进入 Docker sandbox；未来 API 类 tool 会走自己的 API 参数校验和权限策略。
 
+## 中心化多 Agent 协作
+
+当前第一版采用 `subagent as tool`：主 Agent 不移交控制权，子 Agent 只是 `run_subagents` 这个 tool 内部的受控执行单元。
+
+```mermaid
+flowchart TD
+    A[Main Agent loop] --> B[LLM action: run_subagents]
+    B --> C[Tool self-check<br/>validate tasks / forbidden tools / path scope]
+    C --> D[SubAgentRunner]
+    D --> E1[SubAgent A<br/>isolated messages]
+    D --> E2[SubAgent B<br/>isolated messages]
+    D --> E3[SubAgent N<br/>isolated messages]
+    E1 --> F[ScopedToolExecutor<br/>read-only tools + path boundary]
+    E2 --> F
+    E3 --> F
+    F --> G[Collect compact reports]
+    G --> H[Return one observation<br/>to Main Agent]
+    H --> I[Main Agent decides next action]
+```
+
+设计边界：
+
+- 主 Agent 仍然负责规划、审批、文件修改、测试、最终回答和质量控制。
+- 子 Agent 默认只允许只读工具：`list_files`、`read_file`、`grep_files`、`search_skills`、`load_skill`、`search_memory`、`load_memory`。
+- 第一版禁止子 Agent 使用 `write_file`、`run_shell`、`run_tests`、`run_subagents`，避免并行写文件、shell 副作用和递归调度。
+- 每个子任务都有独立 `allowed_tools`、`path_scope` 和 `max_steps`，子 Agent 访问文件时必须落在自己的路径边界内。
+- `run_subagents` 返回给主 Agent 的是压缩报告；完整子步骤写入 run log 的 `subagent_trace`，用于审计和调试。
+
+示例 action：
+
+```json
+{
+  "action": "run_subagents",
+  "args": {
+    "tasks": [
+      {
+        "name": "inspect_tests",
+        "task": "检查 tests 目录中和失败用例相关的线索",
+        "allowed_tools": ["list_files", "read_file", "grep_files"],
+        "path_scope": ["tests/"],
+        "max_steps": 4
+      },
+      {
+        "name": "inspect_runtime",
+        "task": "检查 minicode/runtime.py 中相关执行流程",
+        "allowed_tools": ["read_file", "grep_files"],
+        "path_scope": ["minicode/"],
+        "max_steps": 4
+      }
+    ],
+    "max_parallel": 2
+  }
+}
+```
+
 ## 干预链路
 
 干预链路是模型调用前的一层 `Policy Layer`。它不是某个 tool 的硬编码 guard，也不是执行后再拦截模型；它会先读取当前 user query，生成本轮的结构化策略，然后把策略渲染进本轮 user message。
@@ -357,6 +412,7 @@ MiniCode/
     resume.py
     llm.py
     tools.py
+    subagents.py
     sandbox.py
     permissions.py
     security.py
@@ -404,6 +460,7 @@ MiniCode/
 - `minicode/resume.py`：历史对话恢复。负责定位 run log、读取 JSON，并把历史 session 压缩成可注入当前上下文的 resume context。
 - `minicode/llm.py`：DeepSeek API client。调用 OpenAI-compatible `/chat/completions`，返回模型内容、token 用量和耗时。
 - `minicode/tools.py`：Tool runtime。注册并执行当前支持的 tools，统一返回 `ToolResult`。
+- `minicode/subagents.py`：中心化多 Agent 协作运行器。实现 `run_subagents` 的并行子任务执行、只读工具约束、路径边界和压缩结果回传。
 - `minicode/sandbox.py`：Docker sandbox。负责把命令放进 Docker 的 `/workspace` 中执行，并收集 stdout、stderr、exit code、耗时和权限信息。
 - `minicode/permissions.py`：命令权限策略。对危险命令做 `allow`、`ask`、`deny` 判断，并支持 `never`、`ask`、`always` 三种审批模式。
 - `minicode/security.py`：tool 执行前安全审查。负责工具风险元信息、参数自检、路径越界保护、敏感路径过滤和 secret-like 文件拦截。
@@ -412,7 +469,7 @@ MiniCode/
 - `minicode/ui/repl.py`：交互式 CLI 前端。负责 `--chat` REPL、输入历史、slash command 分发、消费 `iter_turn()` 事件流和 session 保存。
 - `minicode/ui/commands.py`：解析 `/help`、`/status`、`/exit` 等 slash commands。
 - `minicode/ui/render.py`：终端输出渲染。优先使用 `rich`，不可用时退回普通文本。
-- `minicode/observability.py`：结构化日志模型。记录每一步的模型输入摘要、action、tool 参数、权限决策、输出、修改文件、token、耗时和 retrieval trace。
+- `minicode/observability.py`：结构化日志模型。记录每一步的模型输入摘要、action、tool 参数、权限决策、输出、修改文件、token、耗时、retrieval trace 和 subagent trace。
 - `minicode/eval.py`：内置 eval 任务集和指标汇总。用于衡量任务成功率、测试通过率、tool 调用次数、危险命令等。
 - `minicode/harness.py`：后续 harness 占位。未来用于自动判断项目类型、运行验证命令和驱动修复循环。
 - `minicode/memory.py`：文件型 memory store。管理 `.minicode/memory` 下的 Markdown/Text 记忆，支持检索、写入、归档和索引更新。
@@ -807,6 +864,12 @@ flowchart TD
   - 执行位置：Docker `/workspace`。
   - 安全策略：先经过 `CommandPolicy`，再决定是否执行。
 
+- `grep_files`
+  - 参数：`pattern`、`path`、`limit`、`case_sensitive`
+  - 作用：在 workspace 指定路径下搜索文本匹配，返回 `path:line: content`。
+  - 执行位置：本地 host workspace。
+  - 安全策略：会校验路径不能逃出 workspace，默认跳过 `.git`、`.minicode`、缓存目录和过大文件。
+
 - `read_context_artifact`
   - 参数：`artifact_id`、`start_line`、`limit`
   - 作用：按行读取被外置化的大型 tool observation。
@@ -834,6 +897,13 @@ flowchart TD
   - 参数：`memory_id`、`max_chars`
   - 作用：把指定 memory 作为 observation 注入后续上下文。
   - 执行位置：本地 memory store。
+
+- `run_subagents`
+  - 参数：`tasks`、`max_parallel`
+  - 作用：以 tool call 方式并行唤醒多个只读子 Agent，分别完成局部调查，再把压缩报告统一回传给主 Agent。
+  - 执行位置：本地 runtime；子 Agent 内部调用受限 tools。
+  - 安全策略：执行前检查子任务结构、禁用工具和路径边界；第一版禁止子 Agent 写文件、执行 shell、跑测试或递归唤醒子 Agent。
+  - 日志：完整子步骤写入 run log 的 `subagent_trace`。
 
 - `run_shell`
   - 参数：`command`

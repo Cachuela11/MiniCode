@@ -322,6 +322,7 @@ class CodingSession:
                     invalid_command=tool_result.invalid_command,
                     context_event=context_event.to_log_dict(),
                     retrieval_trace=tool_result.retrieval_trace,
+                    subagent_trace=tool_result.subagent_trace,
                     prompt_injection_review=injection_review.to_log_dict(),
                 )
             )
@@ -348,6 +349,7 @@ class CodingSession:
                     "invalid_command": tool_result.invalid_command,
                     "context_event": context_event.to_log_dict(),
                     "retrieval_trace": tool_result.retrieval_trace,
+                    "subagent_trace": tool_result.subagent_trace,
                 },
             )
 

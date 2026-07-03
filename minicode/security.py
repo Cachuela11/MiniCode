@@ -38,11 +38,13 @@ class ToolSecurityReviewer:
             "write_file": ToolRisk("write_file", "file_write", mutates_workspace=True, risk="high"),
             "run_shell": ToolRisk("run_shell", "shell", sandboxed=True, risk="high"),
             "run_tests": ToolRisk("run_tests", "test", sandboxed=True, risk="medium"),
+            "grep_files": ToolRisk("grep_files", "file_read", risk="medium"),
             "read_context_artifact": ToolRisk("read_context_artifact", "context_read", risk="low"),
             "search_skills": ToolRisk("search_skills", "retrieval", risk="low"),
             "load_skill": ToolRisk("load_skill", "retrieval", risk="low"),
             "search_memory": ToolRisk("search_memory", "retrieval", risk="low"),
             "load_memory": ToolRisk("load_memory", "retrieval", risk="low"),
+            "run_subagents": ToolRisk("run_subagents", "subagent", risk="medium"),
         }
 
     def review(self, tool_name: str, args: Any) -> SecurityReviewResult:
@@ -65,12 +67,22 @@ class ToolSecurityReviewer:
             return self._review_write_file(tool_name, risk, args)
         if tool_name in {"run_shell", "run_tests"}:
             return self._review_command(tool_name, risk, args)
+        if tool_name == "grep_files":
+            path_review = self._review_workspace_path(tool_name, risk, args, path_key="path", default_path=".")
+            if path_review.decision != Decision.ALLOW:
+                return path_review
+            pattern = args.get("pattern")
+            if not isinstance(pattern, str) or not pattern.strip():
+                return self._deny(tool_name, risk, "grep_files requires non-empty string args.pattern", invalid=True)
+            return self._allow(tool_name, risk, "security review passed")
         if tool_name == "read_context_artifact":
             return self._review_context_artifact(tool_name, risk, args)
         if tool_name in {"search_skills", "search_memory"}:
             return self._review_query_tool(tool_name, risk, args)
         if tool_name in {"load_skill", "load_memory"}:
             return self._review_load_tool(tool_name, risk, args)
+        if tool_name == "run_subagents":
+            return self._review_subagents(tool_name, risk, args)
         return self._allow(tool_name, risk, "security review passed")
 
     def _review_workspace_path(
@@ -141,6 +153,37 @@ class ToolSecurityReviewer:
         value = args.get(key)
         if not isinstance(value, str) or not value.strip():
             return self._deny(tool_name, risk, f"{tool_name} requires non-empty string args.{key}", invalid=True)
+        return self._allow(tool_name, risk, "security review passed")
+
+    def _review_subagents(self, tool_name: str, risk: ToolRisk, args: dict[str, Any]) -> SecurityReviewResult:
+        tasks = args.get("tasks")
+        if not isinstance(tasks, list) or not tasks:
+            return self._deny(tool_name, risk, "run_subagents requires non-empty args.tasks list", invalid=True)
+        if len(tasks) > 6:
+            return self._deny(tool_name, risk, "run_subagents supports at most 6 tasks", invalid=True)
+        for index, task in enumerate(tasks, start=1):
+            if not isinstance(task, dict):
+                return self._deny(tool_name, risk, f"subagent task #{index} must be an object", invalid=True)
+            task_text = task.get("task")
+            if not isinstance(task_text, str) or not task_text.strip():
+                return self._deny(tool_name, risk, f"subagent task #{index} requires string task", invalid=True)
+            for scope in task.get("path_scope") or ["."]:
+                if not isinstance(scope, str) or self._resolve_workspace_path(scope) is None:
+                    return self._deny(
+                        tool_name,
+                        risk,
+                        f"subagent task #{index} path_scope escapes workspace: {scope}",
+                        dangerous=True,
+                        invalid=True,
+                    )
+            for allowed_tool in task.get("allowed_tools") or []:
+                if allowed_tool in {"write_file", "run_shell", "run_tests", "run_subagents"}:
+                    return self._deny(
+                        tool_name,
+                        risk,
+                        f"subagent task #{index} requests forbidden tool: {allowed_tool}",
+                        dangerous=True,
+                    )
         return self._allow(tool_name, risk, "security review passed")
 
     def _resolve_workspace_path(self, raw_path: str) -> Path | None:

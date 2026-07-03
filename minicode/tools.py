@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -12,6 +13,7 @@ from .retrieval.skill import SkillToolRetriever
 from .sandbox import DockerSandbox, SandboxResult
 from .security import ToolSecurityReviewer
 from .skills import SkillCatalog
+from .subagents import SubAgentRunner, parse_subagent_tasks
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,7 @@ class ToolResult:
     invalid_command: bool = False
     duration_ms: int = 0
     retrieval_trace: dict[str, Any] | None = None
+    subagent_trace: dict[str, Any] | None = None
 
 
 ToolHandler = Callable[[dict[str, Any]], ToolResult]
@@ -59,11 +62,13 @@ class ToolRegistry:
             "read_file": self._read_file,
             "write_file": self._write_file,
             "run_tests": self._run_tests,
+            "grep_files": self._grep_files,
             "read_context_artifact": self._read_context_artifact,
             "search_skills": self._search_skills,
             "load_skill": self._load_skill,
             "search_memory": self._search_memory,
             "load_memory": self._load_memory,
+            "run_subagents": self._run_subagents,
         }
 
     def set_context_manager(self, context_manager: Any) -> None:
@@ -86,11 +91,13 @@ class ToolRegistry:
                 '- read_file: {"path": "relative/path", "start_line": 1, "limit": 200}',
                 '- write_file: {"path": "relative/path", "content": "new file content", "overwrite": false}',
                 '- run_tests: {"command": "test command, default: python -m pytest"}',
+                '- grep_files: {"pattern": "text or regex", "path": ".", "limit": 100, "case_sensitive": false}',
                 '- read_context_artifact: {"artifact_id": "obs-0001", "start_line": 1, "limit": 200}',
                 '- search_skills: {"query": "what you need help with", "limit": 5}',
                 '- load_skill: {"name": "skill_name", "max_chars": 4000}',
                 '- search_memory: {"query": "project fact, past lesson, or session detail", "limit": 5}',
                 '- load_memory: {"memory_id": "memory-id", "max_chars": 4000}',
+                '- run_subagents: {"tasks": [{"name": "short_name", "task": "bounded investigation", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}]}',
                 '- finish: {"answer": "concise final answer for the user"} inside args, e.g. {"action":"finish","args":{"answer":"..."}}',
             ]
         )
@@ -196,6 +203,40 @@ class ToolRegistry:
     def _run_tests(self, args: dict[str, Any]) -> ToolResult:
         command = str(args.get("command", "python -m pytest")).strip() or "python -m pytest"
         return _sandbox_result_to_tool_result(self.sandbox.run(command))
+
+    def _grep_files(self, args: dict[str, Any]) -> ToolResult:
+        pattern = str(args.get("pattern", "")).strip()
+        if not pattern:
+            message = "ERROR: grep_files requires args.pattern."
+            return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
+        root = self._resolve_workspace_path(str(args.get("path", ".")))
+        limit = _as_int(args.get("limit", 100), default=100, minimum=1, maximum=1000)
+        case_sensitive = bool(args.get("case_sensitive", False))
+        flags = 0 if case_sensitive else re.IGNORECASE
+        try:
+            regex = re.compile(pattern, flags=flags)
+        except re.error as exc:
+            message = f"ERROR: invalid regex pattern: {exc}"
+            return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
+
+        files = [root] if root.is_file() else sorted(path for path in root.rglob("*") if path.is_file())
+        rows: list[str] = []
+        for path in files:
+            if _should_skip_file(path, self.workspace):
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            rel = path.relative_to(self.workspace).as_posix()
+            for line_number, line in enumerate(lines, start=1):
+                if regex.search(line):
+                    rows.append(f"{rel}:{line_number}: {line}")
+                    if len(rows) >= limit:
+                        output = "\n".join(rows)
+                        return ToolResult(True, output, stdout=output, exit_code=0)
+        output = "\n".join(rows) or "No matches found."
+        return ToolResult(True, output, stdout=output, exit_code=0)
 
     def _read_context_artifact(self, args: dict[str, Any]) -> ToolResult:
         if self.context_manager is None:
@@ -368,6 +409,30 @@ class ToolRegistry:
         )
         return ToolResult(True, output, stdout=output, exit_code=0)
 
+    def _run_subagents(self, args: dict[str, Any]) -> ToolResult:
+        if self.llm is None or not self.model:
+            message = "ERROR: run_subagents requires an LLM client and model."
+            return ToolResult(False, message, stderr=message, exit_code=1)
+        tasks, error = parse_subagent_tasks(args)
+        if error:
+            return ToolResult(False, f"ERROR: {error}", stderr=f"ERROR: {error}", exit_code=2, invalid_command=True)
+        max_parallel = _as_int(args.get("max_parallel", 4), default=4, minimum=1, maximum=6)
+        batch = SubAgentRunner(
+            llm=self.llm,
+            model=self.model,
+            tools=self,
+            max_parallel=max_parallel,
+        ).run_many(tasks)
+        output = batch.to_observation_text()
+        return ToolResult(
+            batch.status == "completed",
+            output,
+            stdout=output,
+            exit_code=0 if batch.status in {"completed", "partial"} else 1,
+            duration_ms=batch.duration_ms,
+            subagent_trace=batch.to_log_dict(),
+        )
+
     def _resolve_workspace_path(self, raw_path: str) -> Path:
         if not raw_path:
             raise ValueError("path is required")
@@ -405,3 +470,16 @@ def _compact_preview(value: str, limit: int = 300) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 3] + "..."
+
+
+def _should_skip_file(path: Path, workspace: Path) -> bool:
+    try:
+        rel_parts = path.relative_to(workspace).parts
+    except ValueError:
+        return True
+    if any(part in {".git", ".minicode", "__pycache__", ".pytest_cache", ".mypy_cache"} for part in rel_parts):
+        return True
+    try:
+        return path.stat().st_size > 1_000_000
+    except OSError:
+        return True
