@@ -14,6 +14,7 @@ from .llm import DeepSeekClient
 from .memory import FileMemoryStore
 from .permissions import AlwaysApprove, ConsoleApproval, NeverApprove
 from .sandbox import DockerSandbox
+from .skill_evolution import SkillEvolution, SkillEvolutionConfig
 from .skills import SkillCatalog
 from .ui import MiniCodeRepl
 
@@ -31,6 +32,11 @@ def main(argv: list[str] | None = None) -> int:
         "--dream",
         action="store_true",
         help="Run one forced memory dreaming pass and exit.",
+    )
+    parser.add_argument(
+        "--evolve-skills",
+        action="store_true",
+        help="Generate draft skills from successful run logs and exit.",
     )
     parser.add_argument("--model", default=os.getenv("MINICODE_MODEL", "deepseek-v4-flash"))
     parser.add_argument(
@@ -125,6 +131,12 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=int(os.getenv("MINICODE_SKILL_RECALL_K", "8")),
         help="Number of candidate skills to recall before reranking.",
+    )
+    parser.add_argument(
+        "--skill-evolution-limit",
+        type=int,
+        default=int(os.getenv("MINICODE_SKILL_EVOLUTION_LIMIT", "20")),
+        help="Maximum recent run logs inspected by --evolve-skills.",
     )
     parser.add_argument(
         "--context-artifact-dir",
@@ -269,6 +281,20 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result.to_log_dict(), indent=2, ensure_ascii=False))
         return 0 if result.status != "error" else 1
 
+    if args.evolve_skills:
+        result = SkillEvolution(
+            llm=llm,
+            model=args.model,
+            workspace=workspace,
+            config=SkillEvolutionConfig(
+                run_log_path=args.run_log,
+                skills_dir=args.skills_dir,
+                max_runs=args.skill_evolution_limit,
+            ),
+        ).run()
+        print(json.dumps(result.to_log_dict(), indent=2, ensure_ascii=False))
+        return 0 if result.status != "error" else 1
+
     if args.eval:
         report = run_eval(
             model=args.model,
@@ -300,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if not args.task and not args.chat:
-        parser.error("task is required unless --check, --eval, --dream, or --chat is used")
+        parser.error("task is required unless --check, --eval, --dream, --evolve-skills, or --chat is used")
 
     agent = _build_agent(args=args, llm=llm, sandbox=sandbox, skill_catalog=skill_catalog)
 

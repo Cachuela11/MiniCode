@@ -343,6 +343,7 @@ MiniCode/
     refactor_function.md
     input_validation.md
     code_review.md
+    _drafts/
   minicode/
     __main__.py
     __init__.py
@@ -366,6 +367,7 @@ MiniCode/
     harness.py
     memory.py
     dreaming.py
+    skill_evolution.py
     ui/
       __init__.py
       commands.py
@@ -389,7 +391,7 @@ MiniCode/
 
 - `pyproject.toml`：Python 项目配置，定义包名、版本、Python 版本要求和 `minicode` 命令行入口。
 - `.env.example`：环境变量示例，包含 DeepSeek、Docker、日志和 eval 相关配置。
-- `.skills/`：Skill 内容库。这里的 Markdown 文件是给模型看的任务工作流说明，不是 Python 执行代码。
+- `.skills/`：Skill 内容库。这里的 Markdown 文件是给模型看的任务工作流说明，不是 Python 执行代码；`_drafts/` 保存自进化生成的待审核 skill 草稿，不会被自动加载。
 - `.gitignore`：忽略 `.minicode/`、Python 缓存和安装元数据。`.minicode/` 是本机持久运行数据目录，但默认不提交到 Git。
 - `minicode/__main__.py`：支持 `python -m minicode` 的入口文件，只负责转发到 CLI。
 - `minicode/cli.py`：命令行入口，解析参数，创建 `DeepSeekClient`、`DockerSandbox`、`CodingAgent`，并处理 `--check`、`--eval`、`--chat`、`--run-log` 等模式。
@@ -415,6 +417,7 @@ MiniCode/
 - `minicode/harness.py`：后续 harness 占位。未来用于自动判断项目类型、运行验证命令和驱动修复循环。
 - `minicode/memory.py`：文件型 memory store。管理 `.minicode/memory` 下的 Markdown/Text 记忆，支持检索、写入、归档和索引更新。
 - `minicode/dreaming.py`：离线 memory dreaming。负责判断触发条件、精确去重、调用 DeepSeek 合并摘要，并把旧长期记忆归档。
+- `minicode/skill_evolution.py`：离线 skill 自进化。读取成功 run log，提炼可复用工作流，并写入 `.skills/_drafts/` 草稿。
 - `minicode/retrieval/`：统一检索基础层。提供 `RetrievalCandidate`、`RetrievalResult`、`RetrievalTrace` 等共享结构；`search_skills` 和 `search_memory` 的 action 仍然分开，但底层共享检索 trace 结构。
 - `minicode/skills/schema.py`：定义 `Skill`、`SelectedSkill`、`SkillRoute` 等数据结构。
 - `minicode/skills/loader.py`：读取 `.skills/*.md`，解析 frontmatter 和正文。
@@ -452,6 +455,45 @@ flowchart TD
 - 默认自动 route 最多注入 `2` 个 skill，可用 `--max-skills` 调整；默认粗召回 `8` 个候选，可用 `--skill-recall-k` 调整。
 - 完整 tool list 不属于 skill route，它常驻在 L0 system prompt；没有命中 skill 时，只是不额外注入 skill 文档，模型仍然能调用全部 tools。
 - run log 会记录 `skill_route.recalled`、`skill_route.selected`、`skill_route.retrieval_trace`、`reranker` 和精排 token 用量，方便后续 eval 对比 skill 是否有效。
+
+**Skill 自进化**
+
+第一版 skill 自进化是离线草稿生成机制，不会自动修改正式 `.skills/*.md`。
+
+流程总结：
+
+1. 运行 `python -m minicode --evolve-skills` 后，MiniCode 从 `.minicode/runs/` 读取最近的结构化 run log。
+2. 本地规则先筛掉不适合沉淀为 skill 的记录，例如失败任务、危险命令、无最终回答、无可复用工具链路的 run。
+3. 对通过初筛的成功轨迹，MiniCode 把任务、tool sequence、修改文件、测试结果和步骤摘要发给 DeepSeek。
+4. DeepSeek 判断本次轨迹应该 `create`、`update`、`merge` 还是 `reject`，并生成 skill frontmatter 和 workflow 草稿。
+5. MiniCode 只把结果写入 `.skills/_drafts/`，正式 SkillCatalog 只加载 `.skills/*.md`，所以草稿不会自动生效。
+6. 人工审核草稿后，把认可的 Markdown 移动到 `.skills/` 根目录；下一次 agent 启动或 chat turn 重新加载 skill catalog 后才会参与检索和注入。
+
+```mermaid
+flowchart TD
+    A[Persistent run logs<br/>.minicode/runs/*.json] --> B[Load recent successful traces]
+    B --> C[Rule filter<br/>no dangerous command<br/>tests pass if present<br/>has reusable tool workflow]
+    C --> D[DeepSeek skill draft decision<br/>create / update / merge / reject]
+    D -->|reject| E[Skip and record reason]
+    D -->|create / update / merge| F[Write draft markdown<br/>.skills/_drafts/]
+    F --> G[Manual review]
+    G --> H[Move approved draft into .skills/]
+    H --> I[Next SkillCatalog.load<br/>becomes active]
+```
+
+运行：
+
+```powershell
+python -m minicode --evolve-skills
+python -m minicode --evolve-skills --skill-evolution-limit 50
+```
+
+当前过滤逻辑：
+
+- 只检查最近 `MINICODE_SKILL_EVOLUTION_LIMIT` 条 run log，默认 `20`。
+- 跳过没有最终回答、出现危险命令、无效命令过多、最终测试失败的 run。
+- 只有存在可复用信号才交给 DeepSeek，例如多步 tool workflow、调用过 `run_tests`、或修改过文件。
+- DeepSeek 只生成 draft metadata 和 workflow；草稿必须人工审核后移动到 `.skills/` 根目录才会被正式加载。
 
 **统一 Retriever**
 
@@ -823,6 +865,7 @@ flowchart TD
 - `MINICODE_SKILLS_DIR`：Skill Markdown 目录，默认 `.skills`
 - `MINICODE_MAX_SKILLS`：每次最多注入的 skill 数量，默认 `2`
 - `MINICODE_SKILL_RECALL_K`：精排前粗召回的 skill 候选数量，默认 `8`
+- `MINICODE_SKILL_EVOLUTION_LIMIT`：`--evolve-skills` 最多检查最近多少条 run log，默认 `20`
 - `MINICODE_CONTEXT_ARTIFACT_DIR`：大 observation 外置存储目录，默认 `.minicode/context-artifacts`
 - `MINICODE_OBSERVATION_INLINE_LIMIT`：tool observation 小于等于该字符数时直接进入上下文，默认 `6000`
 - `MINICODE_OBSERVATION_PREVIEW_CHARS`：大 observation 外置后保留在 prompt 中的预览字符数，默认 `1200`
@@ -854,6 +897,12 @@ python -m minicode "list files"
 
 ```powershell
 python -m minicode --dream
+```
+
+从历史 run log 生成 skill 草稿：
+
+```powershell
+python -m minicode --evolve-skills
 ```
 
 审批模式：
