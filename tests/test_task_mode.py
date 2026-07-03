@@ -29,15 +29,7 @@ class TaskModeTests(unittest.TestCase):
                 "mode": "subagents",
                 "reason": "needs parallel inspection",
                 "confidence": 0.9,
-                "tasks": [
-                    {
-                        "name": "inspect_tests",
-                        "task": "Inspect tests for failure clues.",
-                        "allowed_tools": ["read_file", "grep_files"],
-                        "path_scope": ["tests/"],
-                        "max_steps": 3,
-                    }
-                ],
+                "planning_hints": ["inspect tests and source separately"],
             }
         )
 
@@ -49,11 +41,12 @@ class TaskModeTests(unittest.TestCase):
         self.assertEqual(decision.source, "llm")
         self.assertEqual(llm.calls, 1)
         self.assertIsNotNone(policy.required_first_action)
-        self.assertEqual(policy.required_first_action.action, "run_subagents")
-        self.assertIn('"action":"run_subagents"', prompt)
+        self.assertEqual(policy.required_first_action.action, "plan_subagents")
+        self.assertIn('"action":"plan_subagents"', prompt)
+        self.assertIn("inspect tests and source separately", prompt)
 
     def test_on_mode_forces_subagents_without_llm(self):
-        llm = TaskModeLlm({"mode": "default", "tasks": []})
+        llm = TaskModeLlm({"mode": "default", "planning_hints": []})
 
         decision = TaskModeRouter(llm=llm, model="fake", mode="on").decide("简单任务也强制")
 

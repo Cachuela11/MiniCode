@@ -44,6 +44,7 @@ class ToolSecurityReviewer:
             "load_skill": ToolRisk("load_skill", "retrieval", risk="low"),
             "search_memory": ToolRisk("search_memory", "retrieval", risk="low"),
             "load_memory": ToolRisk("load_memory", "retrieval", risk="low"),
+            "plan_subagents": ToolRisk("plan_subagents", "subagent_plan", risk="medium"),
             "run_subagents": ToolRisk("run_subagents", "subagent", risk="medium"),
         }
 
@@ -81,7 +82,7 @@ class ToolSecurityReviewer:
             return self._review_query_tool(tool_name, risk, args)
         if tool_name in {"load_skill", "load_memory"}:
             return self._review_load_tool(tool_name, risk, args)
-        if tool_name == "run_subagents":
+        if tool_name in {"plan_subagents", "run_subagents"}:
             return self._review_subagents(tool_name, risk, args)
         return self._allow(tool_name, risk, "security review passed")
 
@@ -177,7 +178,7 @@ class ToolSecurityReviewer:
                         invalid=True,
                     )
             for allowed_tool in task.get("allowed_tools") or []:
-                if allowed_tool in {"write_file", "run_shell", "run_tests", "run_subagents"}:
+                if allowed_tool in {"write_file", "run_shell", "run_tests", "plan_subagents", "run_subagents"}:
                     return self._deny(
                         tool_name,
                         risk,

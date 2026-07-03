@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, replace
@@ -68,6 +69,7 @@ class ToolRegistry:
             "load_skill": self._load_skill,
             "search_memory": self._search_memory,
             "load_memory": self._load_memory,
+            "plan_subagents": self._plan_subagents,
             "run_subagents": self._run_subagents,
         }
 
@@ -97,7 +99,8 @@ class ToolRegistry:
                 '- load_skill: {"name": "skill_name", "max_chars": 4000}',
                 '- search_memory: {"query": "project fact, past lesson, or session detail", "limit": 5}',
                 '- load_memory: {"memory_id": "memory-id", "max_chars": 4000}',
-                '- run_subagents: {"tasks": [{"name": "short_name", "task": "bounded investigation", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}]}',
+                '- plan_subagents: {"goal": "main goal", "tasks": [{"name": "short_name", "task": "bounded investigation", "context": "why this subtask matters", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}], "max_parallel": 2}',
+                '- run_subagents: {"tasks": [{"name": "short_name", "task": "bounded investigation", "context": "approved planning context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}]}',
                 '- finish: {"answer": "concise final answer for the user"} inside args, e.g. {"action":"finish","args":{"answer":"..."}}',
             ]
         )
@@ -407,6 +410,39 @@ class ToolRegistry:
                 body,
             ]
         )
+        return ToolResult(True, output, stdout=output, exit_code=0)
+
+    def _plan_subagents(self, args: dict[str, Any]) -> ToolResult:
+        tasks, error = parse_subagent_tasks(args)
+        if error:
+            return ToolResult(False, f"ERROR: {error}", stderr=f"ERROR: {error}", exit_code=2, invalid_command=True)
+        max_parallel = _as_int(args.get("max_parallel", 4), default=4, minimum=1, maximum=6)
+        approved_tasks = [
+            {
+                "name": task.name,
+                "task": task.task,
+                "context": task.context,
+                "allowed_tools": task.allowed_tools,
+                "path_scope": task.path_scope,
+                "max_steps": task.max_steps,
+            }
+            for task in tasks
+        ]
+        payload = {
+            "status": "approved",
+            "goal": str(args.get("goal") or ""),
+            "approved_tasks": approved_tasks,
+            "max_parallel": min(max_parallel, len(approved_tasks)),
+            "next_action": {
+                "action": "run_subagents",
+                "args": {
+                    "tasks": approved_tasks,
+                    "max_parallel": min(max_parallel, len(approved_tasks)),
+                },
+            },
+            "instruction": "Call run_subagents next with exactly approved_tasks unless you need to revise the plan.",
+        }
+        output = json.dumps(payload, indent=2, ensure_ascii=False)
         return ToolResult(True, output, stdout=output, exit_code=0)
 
     def _run_subagents(self, args: dict[str, Any]) -> ToolResult:

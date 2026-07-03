@@ -20,13 +20,14 @@ READ_ONLY_SUBAGENT_TOOLS = {
     "search_memory",
     "load_memory",
 }
-FORBIDDEN_SUBAGENT_TOOLS = {"write_file", "run_shell", "run_tests", "run_subagents"}
+FORBIDDEN_SUBAGENT_TOOLS = {"write_file", "run_shell", "run_tests", "plan_subagents", "run_subagents"}
 
 
 @dataclass(frozen=True)
 class SubAgentTask:
     name: str
     task: str
+    context: str = ""
     allowed_tools: list[str] = field(default_factory=lambda: sorted(READ_ONLY_SUBAGENT_TOOLS))
     path_scope: list[str] = field(default_factory=lambda: ["."])
     max_steps: int = 4
@@ -54,6 +55,7 @@ class SubAgentStep:
 class SubAgentResult:
     name: str
     task: str
+    context: str
     status: str
     summary: str
     allowed_tools: list[str]
@@ -67,6 +69,7 @@ class SubAgentResult:
         return {
             "name": self.name,
             "task": self.task,
+            "context": self.context,
             "status": self.status,
             "summary": self.summary,
             "allowed_tools": self.allowed_tools,
@@ -156,6 +159,7 @@ class SubAgentRunner:
                     ordered[index] = SubAgentResult(
                         name=task.name,
                         task=task.task,
+                        context=task.context,
                         status="error",
                         summary="Subagent crashed before returning a result.",
                         allowed_tools=task.allowed_tools,
@@ -188,6 +192,7 @@ class SubAgentRunner:
         result = SubAgentResult(
             name=task.name,
             task=task.task,
+            context=task.context,
             status="started",
             summary="",
             allowed_tools=allowed_tools,
@@ -327,6 +332,7 @@ def parse_subagent_tasks(args: dict[str, Any]) -> tuple[list[SubAgentTask], str]
         if not task_text:
             return [], f"subagent task #{index} requires non-empty task"
         name = _slugify(str(item.get("name") or f"subagent_{index}"))
+        context = _preview(str(item.get("context") or ""), 1200)
         allowed_tools = _normalize_allowed_tools(item.get("allowed_tools"))
         path_scope = _normalize_path_scope(item.get("path_scope"))
         max_steps = _as_int(item.get("max_steps"), default=4, minimum=1, maximum=8)
@@ -334,6 +340,7 @@ def parse_subagent_tasks(args: dict[str, Any]) -> tuple[list[SubAgentTask], str]
             SubAgentTask(
                 name=name,
                 task=task_text,
+                context=context,
                 allowed_tools=allowed_tools,
                 path_scope=path_scope,
                 max_steps=max_steps,
@@ -365,6 +372,9 @@ def _subagent_user_prompt(task: SubAgentTask) -> str:
         [
             "Subtask:",
             task.task,
+            "",
+            "Main-agent context for this subtask:",
+            task.context or "No extra context provided.",
             "",
             "Path scope:",
             "\n".join(f"- {scope}" for scope in task.path_scope),

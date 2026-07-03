@@ -78,22 +78,39 @@ class PolicyEngine:
 
         if getattr(task_mode, "use_subagents", False):
             intent = "subagent_assisted" if intent == "general" else intent
-            tasks = [
-                task.to_action_args() if hasattr(task, "to_action_args") else asdict(task)
-                for task in getattr(task_mode, "tasks", [])
-            ]
             required = RequiredAction(
-                action="run_subagents",
-                args={"tasks": tasks, "max_parallel": min(4, max(1, len(tasks)))},
-                reason=getattr(task_mode, "reason", "") or "Task was classified as complex enough for parallel read-only investigation.",
+                action="plan_subagents",
+                args={
+                    "goal": user_message,
+                    "tasks": [
+                        {
+                            "name": "short_snake_case",
+                            "task": "bounded read-only investigation with clear expected evidence",
+                            "context": "main agent planning context for this subtask",
+                            "allowed_tools": ["list_files", "read_file", "grep_files"],
+                            "path_scope": ["relative/path/or/."],
+                            "max_steps": 4,
+                        }
+                    ],
+                    "max_parallel": 2,
+                },
+                reason=getattr(task_mode, "reason", "")
+                or "Task was classified as complex enough for main-agent subagent planning.",
             )
             rules.extend(
                 [
-                    "Call run_subagents as the next action before finish or other investigative tools.",
-                    "Use the subagent reports as evidence, then keep final decisions, edits, tests, and user-facing answers in the main agent.",
+                    "Call plan_subagents as the next action before finish or other investigative tools.",
+                    "You, the main agent, must fill in the subagent plan yourself: split the goal into 1-4 bounded read-only investigations.",
+                    "Each planned subtask must include task, context, allowed_tools, path_scope, and max_steps.",
+                    "After plan_subagents returns an approved plan, call run_subagents with the approved tasks.",
+                    "Keep final decisions, edits, tests, and user-facing answers in the main agent.",
                     "Do not ask subagents to write files, run shell commands, run tests, or spawn other subagents.",
                 ]
             )
+            hints = list(getattr(task_mode, "planning_hints", []) or [])
+            if hints:
+                hints = [f"Subagent planning hint: {hint}" for hint in hints]
+                rules.extend(hints)
 
         return PolicyDecision(
             intent=intent,

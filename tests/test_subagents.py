@@ -72,6 +72,41 @@ class SubAgentLlm:
 
 
 class SubAgentTests(unittest.TestCase):
+    def test_plan_subagents_approves_normalized_plan_without_running_llm(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            registry = ToolRegistry(
+                workspace=workspace,
+                sandbox=FakeSandbox(workspace),
+                llm=SubAgentLlm(),
+                model="fake",
+            )
+
+            result = registry.execute(
+                "plan_subagents",
+                {
+                    "goal": "review runtime",
+                    "tasks": [
+                        {
+                            "name": "Inspect Runtime",
+                            "task": "Inspect runtime flow.",
+                            "context": "Main agent wants evidence before editing.",
+                            "allowed_tools": ["read_file", "grep_files"],
+                            "path_scope": ["."],
+                            "max_steps": 3,
+                        }
+                    ],
+                    "max_parallel": 2,
+                },
+            )
+
+        payload = json.loads(result.output)
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["status"], "approved")
+        self.assertEqual(payload["approved_tasks"][0]["name"], "inspect_runtime")
+        self.assertEqual(payload["next_action"]["action"], "run_subagents")
+        self.assertIn("Main agent wants evidence", payload["approved_tasks"][0]["context"])
+
     def test_run_subagents_executes_parallel_read_only_tasks(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
@@ -120,7 +155,7 @@ class SubAgentTests(unittest.TestCase):
             reviewer = ToolSecurityReviewer(Path(temp_dir))
 
             result = reviewer.review(
-                "run_subagents",
+                "plan_subagents",
                 {
                     "tasks": [
                         {

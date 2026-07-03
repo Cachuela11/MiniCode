@@ -170,8 +170,8 @@ class CliRenderer:
         if event.kind == "task_mode":
             source = event.data.get("source") or "none"
             reason = event.data.get("reason") or ""
-            tasks = event.data.get("tasks") or []
-            suffix = f", tasks={len(tasks)}" if tasks else ""
+            hints = event.data.get("planning_hints") or []
+            suffix = f", hints={len(hints)}" if hints else ""
             detail = f"{event.message} ({source}{suffix})"
             if reason:
                 detail += f": {_text_preview(str(reason), limit=80)}"
