@@ -79,32 +79,39 @@ class PolicyEngine:
         if getattr(task_mode, "use_subagents", False):
             intent = "subagent_assisted" if intent == "general" else intent
             required = RequiredAction(
-                action="plan_subagents",
+                action="plan_subagent_workflow",
                 args={
                     "goal": user_message,
-                    "tasks": [
+                    "stages": [
                         {
-                            "name": "short_snake_case",
-                            "task": "bounded read-only investigation with clear expected evidence",
-                            "context": "main agent planning context for this subtask",
-                            "allowed_tools": ["list_files", "read_file", "grep_files"],
-                            "path_scope": ["relative/path/or/."],
-                            "max_steps": 4,
+                            "name": "stage_name",
+                            "nodes": [
+                                {
+                                    "name": "short_snake_case",
+                                    "task": "bounded read-only investigation with clear expected evidence",
+                                    "context": "main agent planning context for this node",
+                                    "allowed_tools": ["list_files", "read_file", "grep_files"],
+                                    "path_scope": ["relative/path/or/."],
+                                    "max_steps": 4,
+                                }
+                            ],
                         }
                     ],
-                    "max_parallel": 2,
+                    "max_parallel_per_stage": 2,
                 },
                 reason=getattr(task_mode, "reason", "")
-                or "Task was classified as complex enough for main-agent subagent planning.",
+                or "Task was classified as complex enough for main-agent subagent workflow planning.",
             )
             rules.extend(
                 [
-                    "Call plan_subagents as the next action before finish or other investigative tools.",
-                    "You, the main agent, must fill in the subagent plan yourself: split the goal into 1-4 bounded read-only investigations.",
-                    "Each planned subtask must include task, context, allowed_tools, path_scope, and max_steps.",
-                    "After plan_subagents returns an approved plan, call run_subagents with the approved tasks.",
+                    "Call plan_subagent_workflow as the next action before finish or other investigative tools.",
+                    "You, the main agent, must fill in the DAG-style workflow yourself: split the goal into ordered stages.",
+                    "Nodes in the same stage should be independent and may run in parallel.",
+                    "Later stages should depend only on limited handoff context from earlier stages.",
+                    "Each node must include task, context, allowed_tools, path_scope, and max_steps.",
+                    "After plan_subagent_workflow returns an approved workflow, call run_subagent_workflow with the approved stages.",
                     "Keep final decisions, edits, tests, and user-facing answers in the main agent.",
-                    "Do not ask subagents to write files, run shell commands, run tests, or spawn other subagents.",
+                    "Do not ask subagents to write files, run shell commands, run tests, plan subagents, or spawn other subagents.",
                 ]
             )
             hints = list(getattr(task_mode, "planning_hints", []) or [])

@@ -14,7 +14,7 @@ from .retrieval.skill import SkillToolRetriever
 from .sandbox import DockerSandbox, SandboxResult
 from .security import ToolSecurityReviewer
 from .skills import SkillCatalog
-from .subagents import SubAgentRunner, parse_subagent_tasks
+from .subagents import SubAgentRunner, SubAgentWorkflowRunner, parse_subagent_tasks, parse_subagent_workflow
 
 
 @dataclass(frozen=True)
@@ -71,6 +71,8 @@ class ToolRegistry:
             "load_memory": self._load_memory,
             "plan_subagents": self._plan_subagents,
             "run_subagents": self._run_subagents,
+            "plan_subagent_workflow": self._plan_subagent_workflow,
+            "run_subagent_workflow": self._run_subagent_workflow,
         }
 
     def set_context_manager(self, context_manager: Any) -> None:
@@ -101,6 +103,8 @@ class ToolRegistry:
                 '- load_memory: {"memory_id": "memory-id", "max_chars": 4000}',
                 '- plan_subagents: {"goal": "main goal", "tasks": [{"name": "short_name", "task": "bounded investigation", "context": "why this subtask matters", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}], "max_parallel": 2}',
                 '- run_subagents: {"tasks": [{"name": "short_name", "task": "bounded investigation", "context": "approved planning context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}]}',
+                '- plan_subagent_workflow: {"goal": "main goal", "stages": [{"name": "stage_name", "nodes": [{"name": "node_name", "task": "bounded investigation", "context": "stage-local context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}]}], "max_parallel_per_stage": 2}',
+                '- run_subagent_workflow: {"stages": [{"name": "stage_name", "nodes": [{"name": "node_name", "task": "bounded investigation", "context": "approved context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}]}], "max_parallel_per_stage": 2}',
                 '- finish: {"answer": "concise final answer for the user"} inside args, e.g. {"action":"finish","args":{"answer":"..."}}',
             ]
         )
@@ -469,6 +473,56 @@ class ToolRegistry:
             subagent_trace=batch.to_log_dict(),
         )
 
+    def _plan_subagent_workflow(self, args: dict[str, Any]) -> ToolResult:
+        stages, error = parse_subagent_workflow(args)
+        if error:
+            return ToolResult(False, f"ERROR: {error}", stderr=f"ERROR: {error}", exit_code=2, invalid_command=True)
+        max_parallel = _as_int(args.get("max_parallel_per_stage", 4), default=4, minimum=1, maximum=6)
+        approved_stages = [_workflow_stage_to_dict(stage) for stage in stages]
+        payload = {
+            "status": "approved",
+            "goal": str(args.get("goal") or ""),
+            "approved_stages": approved_stages,
+            "max_parallel_per_stage": max_parallel,
+            "next_action": {
+                "action": "run_subagent_workflow",
+                "args": {
+                    "stages": approved_stages,
+                    "max_parallel_per_stage": max_parallel,
+                },
+            },
+            "instruction": (
+                "Call run_subagent_workflow next with exactly approved_stages unless you need to revise "
+                "the workflow. Stage outputs will be passed forward as limited handoff context."
+            ),
+        }
+        output = json.dumps(payload, indent=2, ensure_ascii=False)
+        return ToolResult(True, output, stdout=output, exit_code=0)
+
+    def _run_subagent_workflow(self, args: dict[str, Any]) -> ToolResult:
+        if self.llm is None or not self.model:
+            message = "ERROR: run_subagent_workflow requires an LLM client and model."
+            return ToolResult(False, message, stderr=message, exit_code=1)
+        stages, error = parse_subagent_workflow(args)
+        if error:
+            return ToolResult(False, f"ERROR: {error}", stderr=f"ERROR: {error}", exit_code=2, invalid_command=True)
+        max_parallel = _as_int(args.get("max_parallel_per_stage", 4), default=4, minimum=1, maximum=6)
+        workflow = SubAgentWorkflowRunner(
+            llm=self.llm,
+            model=self.model,
+            tools=self,
+            max_parallel_per_stage=max_parallel,
+        ).run(stages)
+        output = workflow.to_observation_text()
+        return ToolResult(
+            workflow.status == "completed",
+            output,
+            stdout=output,
+            exit_code=0 if workflow.status in {"completed", "partial"} else 1,
+            duration_ms=workflow.duration_ms,
+            subagent_trace=workflow.to_log_dict(),
+        )
+
     def _resolve_workspace_path(self, raw_path: str) -> Path:
         if not raw_path:
             raise ValueError("path is required")
@@ -506,6 +560,23 @@ def _compact_preview(value: str, limit: int = 300) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 3] + "..."
+
+
+def _workflow_stage_to_dict(stage) -> dict[str, Any]:
+    return {
+        "name": stage.name,
+        "nodes": [
+            {
+                "name": node.name,
+                "task": node.task,
+                "context": node.context,
+                "allowed_tools": node.allowed_tools,
+                "path_scope": node.path_scope,
+                "max_steps": node.max_steps,
+            }
+            for node in stage.nodes
+        ],
+    }
 
 
 def _should_skip_file(path: Path, workspace: Path) -> bool:

@@ -31,7 +31,15 @@ class SubAgentLlm:
     def chat_response(self, model, messages):
         text = "\n".join(message["content"] for message in messages)
         if "Observation:" in text:
-            if "source-value" in text:
+            if "test-value" in text:
+                content = json.dumps(
+                    {
+                        "thought": "tests inspected",
+                        "action": "finish",
+                        "args": {"answer": "test report: found test-value in tests/test_source.py"},
+                    }
+                )
+            elif "source-value" in text:
                 content = json.dumps(
                     {
                         "thought": "source inspected",
@@ -42,9 +50,9 @@ class SubAgentLlm:
             else:
                 content = json.dumps(
                     {
-                        "thought": "tests inspected",
+                        "thought": "nothing inspected",
                         "action": "finish",
-                        "args": {"answer": "test report: found test-value in tests/test_source.py"},
+                        "args": {"answer": "no useful report"},
                     }
                 )
         elif "inspect source" in text:
@@ -72,6 +80,99 @@ class SubAgentLlm:
 
 
 class SubAgentTests(unittest.TestCase):
+    def test_plan_subagent_workflow_approves_staged_plan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            registry = ToolRegistry(workspace=workspace, sandbox=FakeSandbox(workspace), llm=SubAgentLlm(), model="fake")
+
+            result = registry.execute(
+                "plan_subagent_workflow",
+                {
+                    "goal": "review runtime",
+                    "stages": [
+                        {
+                            "name": "Locate",
+                            "nodes": [
+                                {
+                                    "name": "Inspect Source",
+                                    "task": "inspect source",
+                                    "context": "Find relevant source.",
+                                    "allowed_tools": ["read_file"],
+                                    "path_scope": ["."],
+                                    "max_steps": 3,
+                                }
+                            ],
+                        }
+                    ],
+                    "max_parallel_per_stage": 2,
+                },
+            )
+
+        payload = json.loads(result.output)
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["status"], "approved")
+        self.assertEqual(payload["approved_stages"][0]["name"], "locate")
+        self.assertEqual(payload["approved_stages"][0]["nodes"][0]["name"], "inspect_source")
+        self.assertEqual(payload["next_action"]["action"], "run_subagent_workflow")
+
+    def test_run_subagent_workflow_runs_stages_and_passes_handoff_context(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "minicode").mkdir()
+            (workspace / "tests").mkdir()
+            (workspace / "minicode" / "source.py").write_text("source-value = 1\n", encoding="utf-8")
+            (workspace / "tests" / "test_source.py").write_text("test-value = 1\n", encoding="utf-8")
+            registry = ToolRegistry(
+                workspace=workspace,
+                sandbox=FakeSandbox(workspace),
+                llm=SubAgentLlm(),
+                model="fake",
+            )
+
+            result = registry.execute(
+                "run_subagent_workflow",
+                {
+                    "stages": [
+                        {
+                            "name": "locate",
+                            "nodes": [
+                                {
+                                    "name": "inspect_source",
+                                    "task": "inspect source",
+                                    "context": "Stage one.",
+                                    "allowed_tools": ["read_file"],
+                                    "path_scope": ["minicode/"],
+                                    "max_steps": 3,
+                                }
+                            ],
+                        },
+                        {
+                            "name": "verify",
+                            "nodes": [
+                                {
+                                    "name": "inspect_tests",
+                                    "task": "inspect tests",
+                                    "context": "Use prior handoff.",
+                                    "allowed_tools": ["read_file"],
+                                    "path_scope": ["tests/"],
+                                    "max_steps": 3,
+                                }
+                            ],
+                        },
+                    ],
+                    "max_parallel_per_stage": 2,
+                },
+            )
+
+        payload = json.loads(result.output)
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(len(payload["stages"]), 2)
+        self.assertIn("source report", payload["stages"][0]["handoff_context"])
+        self.assertIn("test report", payload["final_handoff_context"])
+        self.assertIsNotNone(result.subagent_trace)
+        self.assertEqual(len(result.subagent_trace["stages"]), 2)
+
     def test_plan_subagents_approves_normalized_plan_without_running_llm(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
@@ -163,6 +264,32 @@ class SubAgentTests(unittest.TestCase):
                             "task": "write something",
                             "allowed_tools": ["write_file"],
                             "path_scope": ["."],
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(result.decision, Decision.DENY)
+        self.assertTrue(result.dangerous)
+
+    def test_security_rejects_forbidden_workflow_node_tool(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reviewer = ToolSecurityReviewer(Path(temp_dir))
+
+            result = reviewer.review(
+                "plan_subagent_workflow",
+                {
+                    "stages": [
+                        {
+                            "name": "bad",
+                            "nodes": [
+                                {
+                                    "name": "writer",
+                                    "task": "write something",
+                                    "allowed_tools": ["write_file"],
+                                    "path_scope": ["."],
+                                }
+                            ],
                         }
                     ]
                 },

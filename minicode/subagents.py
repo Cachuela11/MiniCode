@@ -20,7 +20,15 @@ READ_ONLY_SUBAGENT_TOOLS = {
     "search_memory",
     "load_memory",
 }
-FORBIDDEN_SUBAGENT_TOOLS = {"write_file", "run_shell", "run_tests", "plan_subagents", "run_subagents"}
+FORBIDDEN_SUBAGENT_TOOLS = {
+    "write_file",
+    "run_shell",
+    "run_tests",
+    "plan_subagents",
+    "run_subagents",
+    "plan_subagent_workflow",
+    "run_subagent_workflow",
+}
 
 
 @dataclass(frozen=True)
@@ -106,6 +114,67 @@ class SubAgentBatchResult:
         return {
             "status": self.status,
             "results": [result.to_log_dict() for result in self.results],
+            "token_usage": asdict(self.token_usage),
+            "duration_ms": self.duration_ms,
+        }
+
+
+@dataclass(frozen=True)
+class SubAgentWorkflowStage:
+    name: str
+    nodes: list[SubAgentTask]
+
+
+@dataclass
+class SubAgentWorkflowStageResult:
+    index: int
+    name: str
+    status: str
+    results: list[SubAgentResult]
+    handoff_context: str
+    token_usage: TokenUsage = field(default_factory=TokenUsage)
+    duration_ms: int = 0
+
+    def to_observation_dict(self) -> dict[str, Any]:
+        return {
+            "index": self.index,
+            "name": self.name,
+            "status": self.status,
+            "handoff_context": self.handoff_context,
+            "results": [result.to_observation_dict() for result in self.results],
+            "token_usage": asdict(self.token_usage),
+            "duration_ms": self.duration_ms,
+        }
+
+    def to_log_dict(self) -> dict[str, Any]:
+        data = self.to_observation_dict()
+        data["results"] = [result.to_log_dict() for result in self.results]
+        return data
+
+
+@dataclass
+class SubAgentWorkflowResult:
+    status: str
+    stages: list[SubAgentWorkflowStageResult]
+    final_handoff_context: str
+    token_usage: TokenUsage = field(default_factory=TokenUsage)
+    duration_ms: int = 0
+
+    def to_observation_text(self) -> str:
+        payload = {
+            "status": self.status,
+            "final_handoff_context": self.final_handoff_context,
+            "stages": [stage.to_observation_dict() for stage in self.stages],
+            "token_usage": asdict(self.token_usage),
+            "duration_ms": self.duration_ms,
+        }
+        return json.dumps(payload, indent=2, ensure_ascii=False)
+
+    def to_log_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "final_handoff_context": self.final_handoff_context,
+            "stages": [stage.to_log_dict() for stage in self.stages],
             "token_usage": asdict(self.token_usage),
             "duration_ms": self.duration_ms,
         }
@@ -267,6 +336,58 @@ class SubAgentRunner:
         return result
 
 
+class SubAgentWorkflowRunner:
+    def __init__(
+        self,
+        *,
+        llm: ChatClient,
+        model: str,
+        tools: ParentToolExecutor,
+        max_parallel_per_stage: int = 4,
+    ):
+        self.llm = llm
+        self.model = model
+        self.tools = tools
+        self.max_parallel_per_stage = max(1, min(8, max_parallel_per_stage))
+
+    def run(self, stages: list[SubAgentWorkflowStage]) -> SubAgentWorkflowResult:
+        timer = Timer()
+        stage_results: list[SubAgentWorkflowStageResult] = []
+        workflow_usage = TokenUsage()
+        handoff_context = ""
+
+        for index, stage in enumerate(stages, start=1):
+            stage_timer = Timer()
+            nodes = [_with_handoff_context(node, handoff_context) for node in stage.nodes]
+            batch = SubAgentRunner(
+                llm=self.llm,
+                model=self.model,
+                tools=self.tools,
+                max_parallel=self.max_parallel_per_stage,
+            ).run_many(nodes)
+            workflow_usage.add(batch.token_usage)
+            handoff_context = _stage_handoff_context(stage.name, batch.results)
+            stage_result = SubAgentWorkflowStageResult(
+                index=index,
+                name=stage.name,
+                status=batch.status,
+                results=batch.results,
+                handoff_context=handoff_context,
+                token_usage=batch.token_usage,
+                duration_ms=stage_timer.elapsed_ms(),
+            )
+            stage_results.append(stage_result)
+
+        status = "completed" if all(stage.status == "completed" for stage in stage_results) else "partial"
+        return SubAgentWorkflowResult(
+            status=status,
+            stages=stage_results,
+            final_handoff_context=handoff_context,
+            token_usage=workflow_usage,
+            duration_ms=timer.elapsed_ms(),
+        )
+
+
 class ScopedToolExecutor:
     def __init__(
         self,
@@ -349,6 +470,28 @@ def parse_subagent_tasks(args: dict[str, Any]) -> tuple[list[SubAgentTask], str]
     return tasks, ""
 
 
+def parse_subagent_workflow(args: dict[str, Any]) -> tuple[list[SubAgentWorkflowStage], str]:
+    raw_stages = args.get("stages")
+    if not isinstance(raw_stages, list) or not raw_stages:
+        return [], "subagent workflow requires non-empty args.stages list"
+    if len(raw_stages) > 6:
+        return [], "subagent workflow supports at most 6 stages"
+
+    stages: list[SubAgentWorkflowStage] = []
+    for index, item in enumerate(raw_stages, start=1):
+        if not isinstance(item, dict):
+            return [], f"workflow stage #{index} must be an object"
+        name = _slugify(str(item.get("name") or f"stage_{index}"))
+        raw_nodes = item.get("nodes")
+        if raw_nodes is None:
+            raw_nodes = item.get("tasks")
+        nodes, error = parse_subagent_tasks({"tasks": raw_nodes})
+        if error:
+            return [], f"workflow stage #{index}: {error}"
+        stages.append(SubAgentWorkflowStage(name=name, nodes=nodes))
+    return stages, ""
+
+
 def _subagent_system_prompt(tool_descriptions: str) -> str:
     return f"""You are a read-only MiniCode subagent controlled by a main agent.
 
@@ -395,6 +538,42 @@ def _fallback_summary(task: SubAgentTask, steps: list[SubAgentStep]) -> str:
     rows = [f"Subagent reached max steps while working on: {task.task}", "Executed tools:"]
     rows.extend(f"- {step.tool_name}: {step.output_preview}" for step in steps[-3:])
     return "\n".join(rows)
+
+
+def _with_handoff_context(task: SubAgentTask, handoff_context: str) -> SubAgentTask:
+    if not handoff_context:
+        return task
+    merged_context = "\n\n".join(
+        part
+        for part in [
+            task.context.strip(),
+            "Previous stage handoff context:\n" + _preview(handoff_context, 3000),
+        ]
+        if part
+    )
+    return SubAgentTask(
+        name=task.name,
+        task=task.task,
+        context=merged_context,
+        allowed_tools=task.allowed_tools,
+        path_scope=task.path_scope,
+        max_steps=task.max_steps,
+    )
+
+
+def _stage_handoff_context(stage_name: str, results: list[SubAgentResult]) -> str:
+    rows = [f"Stage {stage_name} completed. Useful context for the next stage:"]
+    for result in results:
+        rows.append(
+            "\n".join(
+                [
+                    f"- node: {result.name}",
+                    f"  status: {result.status}",
+                    f"  summary: {_preview(result.summary, 800)}",
+                ]
+            )
+        )
+    return _preview("\n".join(rows), 3500)
 
 
 def _normalize_allowed_tools(value: Any) -> list[str]:

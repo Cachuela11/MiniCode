@@ -182,19 +182,20 @@ flowchart TD
 
 ## 中心化多 Agent 协作
 
-当前第一版采用 `subagent as tool`：主 Agent 不移交控制权，子 Agent 只是 `run_subagents` 这个 tool 内部的受控执行单元。启动方式支持三种：`--subagents auto`、`--subagents on`、`--subagents off`。
+当前第一版采用 `subagent as tool`：主 Agent 不移交控制权，子 Agent 是 tool 内部的受控执行单元。复杂任务默认走 DAG workflow：主 Agent 先规划 stage / node，同一 stage 的节点可以并行，不同 stage 串行传递有限 handoff context。启动方式支持三种：`--subagents auto`、`--subagents on`、`--subagents off`。
 
 处理逻辑：
 
 1. 用户 query 进入单任务 run 或 chat turn 后，先由 `TaskModeRouter` 判断本轮是否需要 subagent。
 2. `off` 直接走默认 agent；`on` 直接进入 subagent planning；`auto` 会先让 DeepSeek 做复杂度判断，只返回模式、原因和 planning hints。
-3. 如果进入 subagent 模式，`PolicyEngine` 会把本轮 required first action 设置成 `plan_subagents`。
-4. 主 Agent 必须先调用 `plan_subagents`，自己根据目标、当前上下文和 planning hints 拆出子任务，并为每个子任务写入 `task`、`context`、`allowed_tools`、`path_scope`、`max_steps`。
-5. `plan_subagents` 只做校验和规范化，不执行子 Agent；它返回 `approved_tasks` 和建议的下一步 `run_subagents` action。
-6. 主 Agent 再调用 `run_subagents`，`SubAgentRunner` 并行启动多个只读子 Agent。
-7. 每个子 Agent 通过 `ScopedToolExecutor` 调用受限工具，路径必须落在自己的 `path_scope` 内。
-8. 子 Agent 完成后只把压缩报告回传给主 Agent；完整子步骤进入 run log 的 `subagent_trace`。
-9. 主 Agent 读取报告后继续决定是否读文件、修改代码、运行测试或最终回答。
+3. 如果进入 subagent 模式，`PolicyEngine` 会把本轮 required first action 设置成 `plan_subagent_workflow`。
+4. 主 Agent 必须先调用 `plan_subagent_workflow`，自己把任务拆成有序 `stages`，每个 stage 下包含一个或多个可并行的 `nodes`。
+5. 每个 node 都要包含 `task`、`context`、`allowed_tools`、`path_scope`、`max_steps`。`context` 是主 Agent 给该 node 的有限上下文。
+6. `plan_subagent_workflow` 只做校验和规范化，不执行子 Agent；它返回 `approved_stages` 和建议的下一步 `run_subagent_workflow` action。
+7. 主 Agent 再调用 `run_subagent_workflow`。每个 stage 内部并行启动多个只读子 Agent；stage 之间串行执行。
+8. 每个 stage 完成后，MiniCode 会把该 stage 的压缩报告合成 `handoff_context`，自动注入到下一 stage 的 node context 中。
+9. 子 Agent 完成后只把压缩报告回传给主 Agent；完整子步骤进入 run log 的 `subagent_trace`。
+10. 主 Agent 读取 workflow 最终报告后继续决定是否读文件、修改代码、运行测试或最终回答。
 
 ```mermaid
 flowchart TD
@@ -207,19 +208,19 @@ flowchart TD
 
     C -->|normal policy directives| F[PolicyEngine]
     D -->|subagent mode + planning_hints| F
-    F -->|required_first_action=plan_subagents| G[Main Agent prompt]
+    F -->|required_first_action=plan_subagent_workflow| G[Main Agent prompt]
     F -->|no subagent directive| G
 
-    G -->|model action: plan_subagents<br/>goal + planned tasks + context| H[ToolRegistry.execute]
-    H -->|security review| I[plan_subagents]
-    I -->|approved_tasks + next_action| J[Observation to Main Agent]
+    G -->|model action: plan_subagent_workflow<br/>goal + stages + nodes + context| H[ToolRegistry.execute]
+    H -->|security review| I[plan_subagent_workflow]
+    I -->|approved_stages + next_action| J[Observation to Main Agent]
 
-    J -->|model action: run_subagents<br/>approved_tasks| K[ToolRegistry.execute]
-    K -->|security review| L[run_subagents]
-    L -->|tasks fan out| M[SubAgentRunner]
-    M -->|task A context + scope| N1[SubAgent A]
-    M -->|task B context + scope| N2[SubAgent B]
-    M -->|task N context + scope| N3[SubAgent N]
+    J -->|model action: run_subagent_workflow<br/>approved_stages| K[ToolRegistry.execute]
+    K -->|security review| L[run_subagent_workflow]
+    L -->|stage 1 nodes fan out| M[SubAgentWorkflowRunner]
+    M -->|node A context + scope| N1[SubAgent A]
+    M -->|node B context + scope| N2[SubAgent B]
+    M -->|node N context + scope| N3[SubAgent N]
 
     N1 -->|tool call| O[ScopedToolExecutor]
     N2 -->|tool call| O
@@ -229,25 +230,27 @@ flowchart TD
     P -->|tool observations| N2
     P -->|tool observations| N3
 
-    N1 -->|compact report| Q[Collect results]
+    N1 -->|compact report| Q[Collect stage results]
     N2 -->|compact report| Q
     N3 -->|compact report| Q
-    Q -->|single observation: summaries only| R[Main Agent]
-    Q -->|full subagent_trace| S[Run log]
-    R -->|next decision: inspect / edit / test / finish| T[Continue main loop]
+    Q -->|stage handoff_context| U[Next stage node contexts]
+    U -->|repeat per stage| M
+    Q -->|final workflow observation: summaries only| R[Main Agent]
+    Q -->|full workflow subagent_trace| S[Run log]
+    R -->|audit and next decision: inspect / edit / test / finish| T[Continue main loop]
 ```
 
 设计边界：
 
-- `auto` 模式会在每个单任务 run 或 chat turn 开始前先做一次任务复杂度判断；简单任务走默认 agent，复杂任务把 `plan_subagents` 注入为本轮 required first action。
-- `on` 模式跳过复杂度判断，直接强制 subagent planning；`off` 模式完全关闭自动 subagent 干预，但模型仍能看到 `plan_subagents` / `run_subagents` tools。
+- `auto` 模式会在每个单任务 run 或 chat turn 开始前先做一次任务复杂度判断；简单任务走默认 agent，复杂任务把 `plan_subagent_workflow` 注入为本轮 required first action。
+- `on` 模式跳过复杂度判断，直接强制 subagent workflow planning；`off` 模式完全关闭自动 subagent 干预，但模型仍能看到 subagent tools。
 - 主 Agent 仍然负责规划、审批、文件修改、测试、最终回答和质量控制。
-- 主 Agent 必须先调用 `plan_subagents` 显式拆任务；该 tool 只校验和规范化计划，不执行子 Agent。
-- `plan_subagents` 返回 approved plan 后，主 Agent 下一步再调用 `run_subagents` 执行并行调查。
+- 主 Agent 必须先调用 `plan_subagent_workflow` 显式拆出 DAG workflow；该 tool 只校验和规范化计划，不执行子 Agent。
+- `plan_subagent_workflow` 返回 approved workflow 后，主 Agent 下一步再调用 `run_subagent_workflow` 执行。
 - 子 Agent 默认只允许只读工具：`list_files`、`read_file`、`grep_files`、`search_skills`、`load_skill`、`search_memory`、`load_memory`。
-- 第一版禁止子 Agent 使用 `write_file`、`run_shell`、`run_tests`、`plan_subagents`、`run_subagents`，避免并行写文件、shell 副作用和递归调度。
-- 每个子任务都有独立 `task`、`context`、`allowed_tools`、`path_scope` 和 `max_steps`，子 Agent 访问文件时必须落在自己的路径边界内。
-- `run_subagents` 返回给主 Agent 的是压缩报告；完整子步骤写入 run log 的 `subagent_trace`，用于审计和调试。
+- 第一版禁止子 Agent 使用 `write_file`、`run_shell`、`run_tests`、`plan_subagents`、`run_subagents`、`plan_subagent_workflow`、`run_subagent_workflow`，避免写文件、shell 副作用和递归调度。
+- 每个 node 都有独立 `task`、`context`、`allowed_tools`、`path_scope` 和 `max_steps`，子 Agent 访问文件时必须落在自己的路径边界内。
+- `run_subagent_workflow` 返回给主 Agent 的是每个 stage 的压缩报告和最终 `handoff_context`；完整子步骤写入 run log 的 `subagent_trace`，用于审计和调试。
 
 运行方式：
 
@@ -258,61 +261,76 @@ python -m minicode --subagents off "默认单 agent 模式执行"
 python -m minicode --chat --subagents auto
 ```
 
-示例 planning action：
+示例 workflow planning action：
 
 ```json
 {
-  "action": "plan_subagents",
+  "action": "plan_subagent_workflow",
   "args": {
     "goal": "review 当前项目的 runtime 设计",
-    "tasks": [
+    "stages": [
       {
-        "name": "inspect_runtime",
-        "task": "检查 minicode/runtime.py 中 agent loop、tool execution 和日志记录流程",
-        "context": "主 Agent 需要先收集 runtime 设计证据，再决定是否提出修改。",
-        "allowed_tools": ["read_file", "grep_files"],
-        "path_scope": ["minicode/"],
-        "max_steps": 4
+        "name": "locate",
+        "nodes": [
+          {
+            "name": "inspect_runtime",
+            "task": "检查 minicode/runtime.py 中 agent loop、tool execution 和日志记录流程",
+            "context": "主 Agent 需要先收集 runtime 设计证据，再决定下一阶段查哪里。",
+            "allowed_tools": ["read_file", "grep_files"],
+            "path_scope": ["minicode/"],
+            "max_steps": 4
+          },
+          {
+            "name": "inspect_tests",
+            "task": "检查 runtime、tool 和 subagent 相关测试覆盖情况",
+            "context": "主 Agent 需要判断测试覆盖缺口。",
+            "allowed_tools": ["list_files", "read_file", "grep_files"],
+            "path_scope": ["tests/"],
+            "max_steps": 4
+          }
+        ]
       },
       {
-        "name": "inspect_tests",
-        "task": "检查 runtime、tool 和 subagent 相关测试覆盖情况",
-        "context": "主 Agent 需要判断是否缺少安全边界和流程测试。",
-        "allowed_tools": ["list_files", "read_file", "grep_files"],
-        "path_scope": ["tests/"],
-        "max_steps": 4
+        "name": "verify",
+        "nodes": [
+          {
+            "name": "verify_findings",
+            "task": "根据上一阶段 handoff context 复核关键结论并提出下一步建议",
+            "context": "本节点会自动收到上一阶段 handoff context。",
+            "allowed_tools": ["read_file", "grep_files"],
+            "path_scope": ["minicode/", "tests/"],
+            "max_steps": 4
+          }
+        ]
       }
     ],
-    "max_parallel": 2
+    "max_parallel_per_stage": 2
   }
 }
 ```
 
-`plan_subagents` 返回 approved plan 后，主 Agent 再调用：
+`plan_subagent_workflow` 返回 approved workflow 后，主 Agent 再调用：
 
 ```json
 {
-  "action": "run_subagents",
+  "action": "run_subagent_workflow",
   "args": {
-    "tasks": [
+    "stages": [
       {
-        "name": "inspect_tests",
-        "task": "检查 tests 目录中和失败用例相关的线索",
-        "context": "来自 plan_subagents 的 approved task context",
-        "allowed_tools": ["list_files", "read_file", "grep_files"],
-        "path_scope": ["tests/"],
-        "max_steps": 4
-      },
-      {
-        "name": "inspect_runtime",
-        "task": "检查 minicode/runtime.py 中相关执行流程",
-        "context": "来自 plan_subagents 的 approved task context",
-        "allowed_tools": ["read_file", "grep_files"],
-        "path_scope": ["minicode/"],
-        "max_steps": 4
+        "name": "locate",
+        "nodes": [
+          {
+            "name": "inspect_runtime",
+            "task": "检查 minicode/runtime.py 中相关执行流程",
+            "context": "来自 approved workflow 的 node context",
+            "allowed_tools": ["read_file", "grep_files"],
+            "path_scope": ["minicode/"],
+            "max_steps": 4
+          }
+        ]
       }
     ],
-    "max_parallel": 2
+    "max_parallel_per_stage": 2
   }
 }
 ```
@@ -330,7 +348,7 @@ flowchart TD
     C -->|workspace_inspection| E[Require file tools before answer]
     C -->|code_change| F[Focused edit + consider tests]
     C -->|test_or_debug| G[Prefer run_tests]
-    C -->|subagent_assisted| S[Required first action<br/>plan_subagents]
+    C -->|subagent_assisted| S[Required first action<br/>plan_subagent_workflow]
     C -->|general| H[No extra directives]
     D --> I[render_policy_prompt]
     E --> I
@@ -347,7 +365,7 @@ flowchart TD
 当前实现位置：
 
 - `minicode/policy.py`：定义 `PolicyEngine`、`PolicyDecision`、`RequiredAction` 和 `render_policy_prompt()`。
-- `minicode/task_mode.py`：在 policy 之前做任务模式判断，`auto` 会调用 DeepSeek 判断复杂度，`on` 会强制进入 subagent planning，但最终子任务由主 Agent 通过 `plan_subagents` 生成。
+- `minicode/task_mode.py`：在 policy 之前做任务模式判断，`auto` 会调用 DeepSeek 判断复杂度，`on` 会强制进入 subagent workflow planning，但最终 DAG workflow 由主 Agent 通过 `plan_subagent_workflow` 生成。
 - `minicode/prompts.py`：构造 task / turn message 时注入 policy 文本。
 - `minicode/runtime.py`：单任务运行开始时生成一次 policy，并写入 `run_log.policies`。
 - `minicode/session.py`：交互式每个 turn 都生成一次 policy，并发送 `policy` UI event。
@@ -359,7 +377,7 @@ flowchart TD
 - 工作区检查 / 分析类请求：要求先使用文件类 tools，不要只凭 memory 或 initial context 回答文件内容。
 - 代码修改类请求：要求聚焦本次修改；修改后如果有合适命令，应运行相关测试，或者说明为什么没跑。
 - 测试 / 调试类请求：优先使用 `run_tests`，只有 `run_tests` 不适合时才用 `run_shell`。
-- 复杂任务且 subagent 模式命中：强制下一步先调用 `plan_subagents`，由主 Agent 规划子任务；计划通过后再调用 `run_subagents`。
+- 复杂任务且 subagent 模式命中：强制下一步先调用 `plan_subagent_workflow`，由主 Agent 规划 DAG workflow；计划通过后再调用 `run_subagent_workflow`。
 
 模型实际看到的是本轮 user message 中的一段 `Policy directives for this turn`。例如项目结构请求会注入：
 
@@ -549,7 +567,7 @@ MiniCode/
 - `minicode/resume.py`：历史对话恢复。负责定位 run log、读取 JSON，并把历史 session 压缩成可注入当前上下文的 resume context。
 - `minicode/llm.py`：DeepSeek API client。调用 OpenAI-compatible `/chat/completions`，返回模型内容、token 用量和耗时。
 - `minicode/tools.py`：Tool runtime。注册并执行当前支持的 tools，统一返回 `ToolResult`。
-- `minicode/subagents.py`：中心化多 Agent 协作运行器。实现 `plan_subagents` 计划规范化、`run_subagents` 并行子任务执行、只读工具约束、路径边界和压缩结果回传。
+- `minicode/subagents.py`：中心化多 Agent 协作运行器。实现 batch 型 `plan_subagents/run_subagents`，以及 DAG 型 `plan_subagent_workflow/run_subagent_workflow`；负责 stage 串行、node 并行、handoff context、只读工具约束、路径边界和压缩结果回传。
 - `minicode/sandbox.py`：Docker sandbox。负责把命令放进 Docker 的 `/workspace` 中执行，并收集 stdout、stderr、exit code、耗时和权限信息。
 - `minicode/permissions.py`：命令权限策略。对危险命令做 `allow`、`ask`、`deny` 判断，并支持 `never`、`ask`、`always` 三种审批模式。
 - `minicode/security.py`：tool 执行前安全审查。负责工具风险元信息、参数自检、路径越界保护、敏感路径过滤和 secret-like 文件拦截。
@@ -1000,6 +1018,20 @@ flowchart TD
   - 执行位置：本地 runtime；子 Agent 内部调用受限 tools。
   - 安全策略：执行前检查子任务结构、禁用工具和路径边界；第一版禁止子 Agent 写文件、执行 shell、跑测试、规划 subagent 或递归唤醒子 Agent。
   - 日志：完整子步骤写入 run log 的 `subagent_trace`。
+
+- `plan_subagent_workflow`
+  - 参数：`goal`、`stages`、`max_parallel_per_stage`
+  - 作用：由主 Agent 显式规划 DAG 型 subagent workflow。每个 stage 包含多个可并行 node，stage 之间串行传递有限 handoff context。
+  - 执行位置：本地 runtime，不会启动子 Agent。
+  - 安全策略：校验每个 stage / node 的结构、禁用工具和路径边界。
+  - 返回：`approved_stages` 和建议的下一步 `run_subagent_workflow` action。
+
+- `run_subagent_workflow`
+  - 参数：`stages`、`max_parallel_per_stage`
+  - 作用：执行 approved DAG workflow。同一 stage 内 node 并行执行；每个 stage 完成后生成 `handoff_context` 并传给下一 stage。
+  - 执行位置：本地 runtime；每个 node 内部是受限只读子 Agent loop。
+  - 安全策略：执行前再次检查 stage / node 结构、禁用工具和路径边界。
+  - 日志：完整 workflow stage、node、step trace 写入 run log 的 `subagent_trace`。
 
 - `run_shell`
   - 参数：`command`

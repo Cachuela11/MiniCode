@@ -46,6 +46,8 @@ class ToolSecurityReviewer:
             "load_memory": ToolRisk("load_memory", "retrieval", risk="low"),
             "plan_subagents": ToolRisk("plan_subagents", "subagent_plan", risk="medium"),
             "run_subagents": ToolRisk("run_subagents", "subagent", risk="medium"),
+            "plan_subagent_workflow": ToolRisk("plan_subagent_workflow", "subagent_workflow_plan", risk="medium"),
+            "run_subagent_workflow": ToolRisk("run_subagent_workflow", "subagent_workflow", risk="medium"),
         }
 
     def review(self, tool_name: str, args: Any) -> SecurityReviewResult:
@@ -84,6 +86,8 @@ class ToolSecurityReviewer:
             return self._review_load_tool(tool_name, risk, args)
         if tool_name in {"plan_subagents", "run_subagents"}:
             return self._review_subagents(tool_name, risk, args)
+        if tool_name in {"plan_subagent_workflow", "run_subagent_workflow"}:
+            return self._review_subagent_workflow(tool_name, risk, args)
         return self._allow(tool_name, risk, "security review passed")
 
     def _review_workspace_path(
@@ -110,6 +114,29 @@ class ToolSecurityReviewer:
             return self._deny(tool_name, risk, f"secret-like file is blocked: {rel_path}", dangerous=True)
         if require_file_path and resolved == self.workspace:
             return self._deny(tool_name, risk, f"{tool_name} requires a file path", invalid=True)
+        return self._allow(tool_name, risk, "security review passed")
+
+    def _review_subagent_workflow(self, tool_name: str, risk: ToolRisk, args: dict[str, Any]) -> SecurityReviewResult:
+        stages = args.get("stages")
+        if not isinstance(stages, list) or not stages:
+            return self._deny(tool_name, risk, f"{tool_name} requires non-empty args.stages list", invalid=True)
+        if len(stages) > 6:
+            return self._deny(tool_name, risk, "subagent workflow supports at most 6 stages", invalid=True)
+        for stage_index, stage in enumerate(stages, start=1):
+            if not isinstance(stage, dict):
+                return self._deny(tool_name, risk, f"workflow stage #{stage_index} must be an object", invalid=True)
+            nodes = stage.get("nodes")
+            if nodes is None:
+                nodes = stage.get("tasks")
+            review = self._review_subagents(tool_name, risk, {"tasks": nodes})
+            if review.decision != Decision.ALLOW:
+                return self._deny(
+                    tool_name,
+                    risk,
+                    f"workflow stage #{stage_index}: {review.reason}",
+                    dangerous=review.dangerous,
+                    invalid=review.invalid,
+                )
         return self._allow(tool_name, risk, "security review passed")
 
     def _review_write_file(self, tool_name: str, risk: ToolRisk, args: dict[str, Any]) -> SecurityReviewResult:
@@ -178,7 +205,15 @@ class ToolSecurityReviewer:
                         invalid=True,
                     )
             for allowed_tool in task.get("allowed_tools") or []:
-                if allowed_tool in {"write_file", "run_shell", "run_tests", "plan_subagents", "run_subagents"}:
+                if allowed_tool in {
+                    "write_file",
+                    "run_shell",
+                    "run_tests",
+                    "plan_subagents",
+                    "run_subagents",
+                    "plan_subagent_workflow",
+                    "run_subagent_workflow",
+                }:
                     return self._deny(
                         tool_name,
                         risk,

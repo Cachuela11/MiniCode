@@ -41,8 +41,8 @@ class TaskModeTests(unittest.TestCase):
         self.assertEqual(decision.source, "llm")
         self.assertEqual(llm.calls, 1)
         self.assertIsNotNone(policy.required_first_action)
-        self.assertEqual(policy.required_first_action.action, "plan_subagents")
-        self.assertIn('"action":"plan_subagents"', prompt)
+        self.assertEqual(policy.required_first_action.action, "plan_subagent_workflow")
+        self.assertIn('"action":"plan_subagent_workflow"', prompt)
         self.assertIn("inspect tests and source separately", prompt)
 
     def test_on_mode_forces_subagents_without_llm(self):
