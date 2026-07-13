@@ -184,6 +184,8 @@ flowchart TD
 
 当前第一版采用 `subagent as tool`：主 Agent 不移交控制权，子 Agent 是 tool 内部的受控执行单元。复杂任务默认走 DAG workflow：主 Agent 先规划 stage / node，同一 stage 的节点可以并行，不同 stage 串行传递有限 handoff context。启动方式支持三种：`--subagents auto`、`--subagents on`、`--subagents off`。
 
+这里的 `handoff_context` 指上一个 stage 交给下一个 stage 的精简上下文，只保留后续节点需要的结论、证据和下一步建议，不传递完整子 Agent 执行轨迹。
+
 处理逻辑：
 
 1. 用户 query 进入单任务 run 或 chat turn 后，先由 `TaskModeRouter` 判断本轮是否需要 subagent。
