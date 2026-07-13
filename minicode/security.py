@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .permissions import Decision
+from .subagents import MAX_STAGE_NODES, MAX_WORKFLOW_STAGES
 
 
 @dataclass(frozen=True)
@@ -120,8 +121,13 @@ class ToolSecurityReviewer:
         stages = args.get("stages")
         if not isinstance(stages, list) or not stages:
             return self._deny(tool_name, risk, f"{tool_name} requires non-empty args.stages list", invalid=True)
-        if len(stages) > 6:
-            return self._deny(tool_name, risk, "subagent workflow supports at most 6 stages", invalid=True)
+        if len(stages) > MAX_WORKFLOW_STAGES:
+            return self._deny(
+                tool_name,
+                risk,
+                f"subagent workflow supports at most {MAX_WORKFLOW_STAGES} stages",
+                invalid=True,
+            )
         for stage_index, stage in enumerate(stages, start=1):
             if not isinstance(stage, dict):
                 return self._deny(tool_name, risk, f"workflow stage #{stage_index} must be an object", invalid=True)
@@ -187,8 +193,13 @@ class ToolSecurityReviewer:
         tasks = args.get("tasks")
         if not isinstance(tasks, list) or not tasks:
             return self._deny(tool_name, risk, "run_subagents requires non-empty args.tasks list", invalid=True)
-        if len(tasks) > 6:
-            return self._deny(tool_name, risk, "run_subagents supports at most 6 tasks", invalid=True)
+        if len(tasks) > MAX_STAGE_NODES:
+            return self._deny(
+                tool_name,
+                risk,
+                f"run_subagents supports at most {MAX_STAGE_NODES} tasks",
+                invalid=True,
+            )
         for index, task in enumerate(tasks, start=1):
             if not isinstance(task, dict):
                 return self._deny(tool_name, risk, f"subagent task #{index} must be an object", invalid=True)

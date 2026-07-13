@@ -47,6 +47,14 @@ SNAPSHOT_IGNORED_DIRS = {
     "build",
 }
 SNAPSHOT_IGNORED_PATTERNS = {"*.pyc", "*.pyo", "*.egg-info"}
+MAX_WORKFLOW_STAGES = 4
+MAX_STAGE_NODES = 3
+SUBAGENT_CONTEXT_LIMIT = 1200
+SUBAGENT_SUMMARY_LIMIT = 800
+NODE_HANDOFF_LIMIT = 1200
+STAGE_HANDOFF_LIMIT = 1500
+FINAL_HANDOFF_LIMIT = 2000
+MAX_STRUCTURED_ITEMS = 3
 
 
 @dataclass(frozen=True)
@@ -339,7 +347,9 @@ class SubAgentRunner:
             if not isinstance(args, dict):
                 args = {}
             if name == "finish":
-                answer = extract_finish_answer(action, args)
+                answer = _compact_subagent_answer(args.get("answer") if "answer" in args else action.get("answer"))
+                if not answer:
+                    answer = _compact_subagent_answer(extract_finish_answer(action, args))
                 result.steps.append(
                     SubAgentStep(
                         step=step_number,
@@ -347,14 +357,14 @@ class SubAgentRunner:
                         tool_name="finish",
                         tool_args=args,
                         ok=True,
-                        output_preview=_preview(answer, 1200),
+                        output_preview=_preview(answer, SUBAGENT_SUMMARY_LIMIT),
                         exit_code=0,
                         token_usage=response.token_usage,
                         duration_ms=step_timer.elapsed_ms(),
                     )
                 )
                 result.status = "completed"
-                result.summary = _preview(answer, 2000)
+                result.summary = _preview(answer, SUBAGENT_SUMMARY_LIMIT)
                 result.duration_ms = timer.elapsed_ms()
                 return result
 
@@ -367,7 +377,7 @@ class SubAgentRunner:
                     tool_name=name,
                     tool_args=args,
                     ok=bool(tool_result.ok),
-                    output_preview=_preview(output, 1200),
+                    output_preview=_preview(output, SUBAGENT_SUMMARY_LIMIT),
                     exit_code=tool_result.exit_code,
                     token_usage=response.token_usage,
                     duration_ms=step_timer.elapsed_ms(),
@@ -433,7 +443,7 @@ class SubAgentWorkflowRunner:
         return SubAgentWorkflowResult(
             status=status,
             stages=stage_results,
-            final_handoff_context=handoff_context,
+            final_handoff_context=_preview(handoff_context, FINAL_HANDOFF_LIMIT),
             token_usage=workflow_usage,
             duration_ms=timer.elapsed_ms(),
         )
@@ -572,8 +582,8 @@ def parse_subagent_tasks(args: dict[str, Any]) -> tuple[list[SubAgentTask], str]
     raw_tasks = args.get("tasks")
     if not isinstance(raw_tasks, list) or not raw_tasks:
         return [], "run_subagents requires non-empty args.tasks list"
-    if len(raw_tasks) > 6:
-        return [], "run_subagents supports at most 6 subagent tasks per call"
+    if len(raw_tasks) > MAX_STAGE_NODES:
+        return [], f"run_subagents supports at most {MAX_STAGE_NODES} subagent tasks per call"
 
     tasks: list[SubAgentTask] = []
     for index, item in enumerate(raw_tasks, start=1):
@@ -583,7 +593,7 @@ def parse_subagent_tasks(args: dict[str, Any]) -> tuple[list[SubAgentTask], str]
         if not task_text:
             return [], f"subagent task #{index} requires non-empty task"
         name = _slugify(str(item.get("name") or f"subagent_{index}"))
-        context = _preview(str(item.get("context") or ""), 1200)
+        context = _preview(str(item.get("context") or ""), SUBAGENT_CONTEXT_LIMIT)
         allowed_tools = _normalize_allowed_tools(item.get("allowed_tools"))
         path_scope = _normalize_path_scope(item.get("path_scope"))
         max_steps = _as_int(item.get("max_steps"), default=4, minimum=1, maximum=8)
@@ -604,8 +614,8 @@ def parse_subagent_workflow(args: dict[str, Any]) -> tuple[list[SubAgentWorkflow
     raw_stages = args.get("stages")
     if not isinstance(raw_stages, list) or not raw_stages:
         return [], "subagent workflow requires non-empty args.stages list"
-    if len(raw_stages) > 6:
-        return [], "subagent workflow supports at most 6 stages"
+    if len(raw_stages) > MAX_WORKFLOW_STAGES:
+        return [], f"subagent workflow supports at most {MAX_WORKFLOW_STAGES} stages"
 
     stages: list[SubAgentWorkflowStage] = []
     for index, item in enumerate(raw_stages, start=1):
@@ -632,11 +642,12 @@ only within the provided path scope.
 
 Return exactly one JSON object and no Markdown fences. Every response must
 include "action" and "args". For final reports use:
-{{"action":"finish","args":{{"answer":"compact report with findings, evidence, and suggested next actions"}}}}
+{{"action":"finish","args":{{"answer":{{"summary":"one sentence","findings":[{{"file":"path","line":1,"fact":"evidence"}}],"handoff":["facts the next node needs"],"next":["suggested next action"]}}}}}}
+Keep final reports small: at most 3 findings, 3 handoff items, and 3 next items.
 
 Available actions:
 {tool_descriptions}
-- finish: {{"answer": "compact report for the main agent"}}
+- finish: {{"answer": {{"summary": "...", "findings": [], "handoff": [], "next": []}}}}
 """
 
 
@@ -653,10 +664,11 @@ def _subagent_user_prompt(task: SubAgentTask) -> str:
             "\n".join(f"- {scope}" for scope in task.path_scope),
             "",
             "Report requirements:",
-            "- Summarize only the useful findings.",
-            "- Include file paths and line numbers when available.",
-            "- Say what you inspected.",
-            "- Suggest next actions for the main agent.",
+            "- Return args.answer as a compact structured object.",
+            "- summary: one short sentence about what you found.",
+            "- findings: at most 3 useful facts, with file paths and line numbers when available.",
+            "- handoff: at most 3 facts the next stage or main agent should keep.",
+            "- next: at most 3 suggested next actions for the main agent.",
             "- Do not include full file contents or huge tool output.",
         ]
     )
@@ -664,10 +676,17 @@ def _subagent_user_prompt(task: SubAgentTask) -> str:
 
 def _fallback_summary(task: SubAgentTask, steps: list[SubAgentStep]) -> str:
     if not steps:
-        return "No steps were executed."
-    rows = [f"Subagent reached max steps while working on: {task.task}", "Executed tools:"]
-    rows.extend(f"- {step.tool_name}: {step.output_preview}" for step in steps[-3:])
-    return "\n".join(rows)
+        return _compact_subagent_answer({"summary": "No steps were executed.", "findings": [], "handoff": [], "next": []})
+    payload = {
+        "summary": f"Subagent reached max steps while working on: {task.task}",
+        "findings": [
+            {"file": "", "line": None, "fact": f"{step.tool_name}: {_preview(step.output_preview, 180)}"}
+            for step in steps[-MAX_STRUCTURED_ITEMS:]
+        ],
+        "handoff": [],
+        "next": ["Main agent should inspect the trace before relying on this result."],
+    }
+    return _compact_subagent_answer(payload)
 
 
 def _with_handoff_context(task: SubAgentTask, handoff_context: str) -> SubAgentTask:
@@ -677,7 +696,7 @@ def _with_handoff_context(task: SubAgentTask, handoff_context: str) -> SubAgentT
         part
         for part in [
             task.context.strip(),
-            "Previous stage handoff context:\n" + _preview(handoff_context, 3000),
+            "Previous stage handoff context:\n" + _preview(handoff_context, NODE_HANDOFF_LIMIT),
         ]
         if part
     )
@@ -692,18 +711,95 @@ def _with_handoff_context(task: SubAgentTask, handoff_context: str) -> SubAgentT
 
 
 def _stage_handoff_context(stage_name: str, results: list[SubAgentResult]) -> str:
-    rows = [f"Stage {stage_name} completed. Useful context for the next stage:"]
+    nodes: list[dict[str, Any]] = []
     for result in results:
-        rows.append(
-            "\n".join(
-                [
-                    f"- node: {result.name}",
-                    f"  status: {result.status}",
-                    f"  summary: {_preview(result.summary, 800)}",
-                ]
+        nodes.append(_handoff_node_payload(result))
+    payload = {"stage": stage_name, "nodes": nodes}
+    return _preview(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), STAGE_HANDOFF_LIMIT)
+
+
+def _handoff_node_payload(result: SubAgentResult) -> dict[str, Any]:
+    summary = _load_summary_payload(result.summary)
+    return {
+        "node": result.name,
+        "status": result.status,
+        "summary": _preview(str(summary.get("summary") or result.summary), 240),
+        "findings": _compact_list(summary.get("findings"), MAX_STRUCTURED_ITEMS, 220),
+        "handoff": _compact_list(summary.get("handoff"), MAX_STRUCTURED_ITEMS, 160),
+        "next": _compact_list(summary.get("next"), MAX_STRUCTURED_ITEMS, 160),
+    }
+
+
+def _compact_subagent_answer(value: Any) -> str:
+    payload = _load_summary_payload(value)
+    if not payload:
+        text = _preview(" ".join(str(value or "").split()), 240)
+        return _fit_summary_json({"summary": text, "findings": [], "handoff": [], "next": []}, SUBAGENT_SUMMARY_LIMIT)
+
+    compact = {
+        "summary": _preview(str(payload.get("summary") or ""), 240),
+        "findings": _compact_list(payload.get("findings"), MAX_STRUCTURED_ITEMS, 180),
+        "handoff": _compact_list(payload.get("handoff"), MAX_STRUCTURED_ITEMS, 160),
+        "next": _compact_list(payload.get("next"), MAX_STRUCTURED_ITEMS, 160),
+    }
+    if not compact["summary"]:
+        compact["summary"] = _preview(" ".join(str(value or "").split()), 240)
+    return _fit_summary_json(compact, SUBAGENT_SUMMARY_LIMIT)
+
+
+def _load_summary_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                return {}
+            if isinstance(parsed, dict):
+                return parsed
+    return {}
+
+
+def _compact_list(value: Any, limit: int, item_limit: int) -> list[Any]:
+    if not isinstance(value, list):
+        return []
+    compact: list[Any] = []
+    for item in value[:limit]:
+        if isinstance(item, dict):
+            compact.append(
+                {
+                    key: _preview(str(val), item_limit)
+                    for key, val in item.items()
+                    if key in {"file", "line", "fact", "evidence", "detail", "reason"} and val is not None
+                }
             )
-        )
-    return _preview("\n".join(rows), 3500)
+        else:
+            compact.append(_preview(str(item), item_limit))
+    return compact
+
+
+def _fit_summary_json(payload: dict[str, Any], limit: int) -> str:
+    compact = dict(payload)
+    for item_limit in [160, 120, 80, 50]:
+        compact["summary"] = _preview(str(compact.get("summary") or ""), min(180, item_limit * 2))
+        compact["findings"] = _compact_list(compact.get("findings"), MAX_STRUCTURED_ITEMS, item_limit)
+        compact["handoff"] = _compact_list(compact.get("handoff"), MAX_STRUCTURED_ITEMS, item_limit)
+        compact["next"] = _compact_list(compact.get("next"), MAX_STRUCTURED_ITEMS, item_limit)
+        encoded = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+        if len(encoded) <= limit:
+            return encoded
+
+    compact["findings"] = compact.get("findings", [])[:1]
+    compact["handoff"] = compact.get("handoff", [])[:1]
+    compact["next"] = compact.get("next", [])[:1]
+    compact["summary"] = _preview(str(compact.get("summary") or ""), 120)
+    encoded = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded) <= limit:
+        return encoded
+    minimal = {"summary": _preview(str(compact.get("summary") or ""), 120), "findings": [], "handoff": [], "next": []}
+    return json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
 
 
 def _normalize_allowed_tools(value: Any) -> list[str]:

@@ -14,7 +14,14 @@ from .retrieval.skill import SkillToolRetriever
 from .sandbox import DockerSandbox, SandboxResult
 from .security import ToolSecurityReviewer
 from .skills import SkillCatalog
-from .subagents import SubAgentRunner, SubAgentWorkflowRunner, parse_subagent_tasks, parse_subagent_workflow
+from .subagents import (
+    MAX_STAGE_NODES,
+    MAX_WORKFLOW_STAGES,
+    SubAgentRunner,
+    SubAgentWorkflowRunner,
+    parse_subagent_tasks,
+    parse_subagent_workflow,
+)
 
 
 @dataclass(frozen=True)
@@ -101,10 +108,10 @@ class ToolRegistry:
                 '- load_skill: {"name": "skill_name", "max_chars": 4000}',
                 '- search_memory: {"query": "project fact, past lesson, or session detail", "limit": 5}',
                 '- load_memory: {"memory_id": "memory-id", "max_chars": 4000}',
-                '- plan_subagents: {"goal": "main goal", "tasks": [{"name": "short_name", "task": "bounded investigation", "context": "why this subtask matters", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}], "max_parallel": 2}',
-                '- run_subagents: {"tasks": [{"name": "short_name", "task": "bounded investigation", "context": "approved planning context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}]}',
-                '- plan_subagent_workflow: {"goal": "main goal", "stages": [{"name": "stage_name", "nodes": [{"name": "node_name", "task": "bounded investigation", "context": "stage-local context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}]}], "max_parallel_per_stage": 2}',
-                '- run_subagent_workflow: {"stages": [{"name": "stage_name", "nodes": [{"name": "node_name", "task": "bounded investigation", "context": "approved context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}]}], "max_parallel_per_stage": 2}',
+                f'- plan_subagents: max {MAX_STAGE_NODES} tasks, {{"goal": "main goal", "tasks": [{{"name": "short_name", "task": "bounded investigation", "context": "why this subtask matters", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}}], "max_parallel": 2}}',
+                f'- run_subagents: max {MAX_STAGE_NODES} tasks, {{"tasks": [{{"name": "short_name", "task": "bounded investigation", "context": "approved planning context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}}]}}',
+                f'- plan_subagent_workflow: max {MAX_WORKFLOW_STAGES} stages and max {MAX_STAGE_NODES} nodes per stage, {{"goal": "main goal", "stages": [{{"name": "stage_name", "nodes": [{{"name": "node_name", "task": "bounded investigation", "context": "stage-local context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}}]}}], "max_parallel_per_stage": 2}}',
+                f'- run_subagent_workflow: max {MAX_WORKFLOW_STAGES} stages and max {MAX_STAGE_NODES} nodes per stage, {{"stages": [{{"name": "stage_name", "nodes": [{{"name": "node_name", "task": "bounded investigation", "context": "approved context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}}]}}], "max_parallel_per_stage": 2}}',
                 '- finish: {"answer": "concise final answer for the user"} inside args, e.g. {"action":"finish","args":{"answer":"..."}}',
             ]
         )
@@ -420,7 +427,12 @@ class ToolRegistry:
         tasks, error = parse_subagent_tasks(args)
         if error:
             return ToolResult(False, f"ERROR: {error}", stderr=f"ERROR: {error}", exit_code=2, invalid_command=True)
-        max_parallel = _as_int(args.get("max_parallel", 4), default=4, minimum=1, maximum=6)
+        max_parallel = _as_int(
+            args.get("max_parallel", MAX_STAGE_NODES),
+            default=MAX_STAGE_NODES,
+            minimum=1,
+            maximum=MAX_STAGE_NODES,
+        )
         approved_tasks = [
             {
                 "name": task.name,
@@ -456,7 +468,12 @@ class ToolRegistry:
         tasks, error = parse_subagent_tasks(args)
         if error:
             return ToolResult(False, f"ERROR: {error}", stderr=f"ERROR: {error}", exit_code=2, invalid_command=True)
-        max_parallel = _as_int(args.get("max_parallel", 4), default=4, minimum=1, maximum=6)
+        max_parallel = _as_int(
+            args.get("max_parallel", MAX_STAGE_NODES),
+            default=MAX_STAGE_NODES,
+            minimum=1,
+            maximum=MAX_STAGE_NODES,
+        )
         batch = SubAgentRunner(
             llm=self.llm,
             model=self.model,
@@ -477,7 +494,12 @@ class ToolRegistry:
         stages, error = parse_subagent_workflow(args)
         if error:
             return ToolResult(False, f"ERROR: {error}", stderr=f"ERROR: {error}", exit_code=2, invalid_command=True)
-        max_parallel = _as_int(args.get("max_parallel_per_stage", 4), default=4, minimum=1, maximum=6)
+        max_parallel = _as_int(
+            args.get("max_parallel_per_stage", MAX_STAGE_NODES),
+            default=MAX_STAGE_NODES,
+            minimum=1,
+            maximum=MAX_STAGE_NODES,
+        )
         approved_stages = [_workflow_stage_to_dict(stage) for stage in stages]
         payload = {
             "status": "approved",
@@ -506,7 +528,12 @@ class ToolRegistry:
         stages, error = parse_subagent_workflow(args)
         if error:
             return ToolResult(False, f"ERROR: {error}", stderr=f"ERROR: {error}", exit_code=2, invalid_command=True)
-        max_parallel = _as_int(args.get("max_parallel_per_stage", 4), default=4, minimum=1, maximum=6)
+        max_parallel = _as_int(
+            args.get("max_parallel_per_stage", MAX_STAGE_NODES),
+            default=MAX_STAGE_NODES,
+            minimum=1,
+            maximum=MAX_STAGE_NODES,
+        )
         workflow = SubAgentWorkflowRunner(
             llm=self.llm,
             model=self.model,

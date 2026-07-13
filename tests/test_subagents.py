@@ -8,6 +8,7 @@ from minicode.llm import LLMResponse
 from minicode.observability import TokenUsage
 from minicode.permissions import Decision
 from minicode.security import ToolSecurityReviewer
+from minicode.subagents import STAGE_HANDOFF_LIMIT, SUBAGENT_SUMMARY_LIMIT
 from minicode.tools import ToolRegistry
 
 
@@ -87,6 +88,26 @@ class SubAgentLlm:
         )
 
 
+class VerboseStructuredSubAgentLlm:
+    def chat_response(self, model, messages):
+        answer = {
+            "summary": "Structured summary " + ("x" * 500),
+            "findings": [
+                {"file": f"file_{index}.py", "line": index, "fact": "fact " + ("y" * 250)}
+                for index in range(1, 8)
+            ],
+            "handoff": ["handoff " + ("z" * 250) for _ in range(6)],
+            "next": ["next " + ("n" * 250) for _ in range(6)],
+        }
+        content = json.dumps({"thought": "done", "action": "finish", "args": {"answer": answer}})
+        return LLMResponse(
+            content=content,
+            token_usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            duration_ms=1,
+            raw={},
+        )
+
+
 class SubAgentTests(unittest.TestCase):
     def test_plan_subagent_workflow_approves_staged_plan(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -122,6 +143,50 @@ class SubAgentTests(unittest.TestCase):
         self.assertEqual(payload["approved_stages"][0]["name"], "locate")
         self.assertEqual(payload["approved_stages"][0]["nodes"][0]["name"], "inspect_source")
         self.assertEqual(payload["next_action"]["action"], "run_subagent_workflow")
+
+    def test_workflow_rejects_more_than_four_stages(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            registry = ToolRegistry(workspace=workspace, sandbox=FakeSandbox(workspace), llm=SubAgentLlm(), model="fake")
+
+            result = registry.execute(
+                "plan_subagent_workflow",
+                {
+                    "stages": [
+                        {
+                            "name": f"stage_{index}",
+                            "nodes": [{"name": "node", "task": "inspect", "path_scope": ["."]}],
+                        }
+                        for index in range(5)
+                    ]
+                },
+            )
+
+        self.assertFalse(result.ok)
+        self.assertIn("at most 4 stages", result.output)
+
+    def test_workflow_rejects_more_than_three_nodes_per_stage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            registry = ToolRegistry(workspace=workspace, sandbox=FakeSandbox(workspace), llm=SubAgentLlm(), model="fake")
+
+            result = registry.execute(
+                "plan_subagent_workflow",
+                {
+                    "stages": [
+                        {
+                            "name": "too_many",
+                            "nodes": [
+                                {"name": f"node_{index}", "task": "inspect", "path_scope": ["."]}
+                                for index in range(4)
+                            ],
+                        }
+                    ]
+                },
+            )
+
+        self.assertFalse(result.ok)
+        self.assertIn("at most 3", result.output)
 
     def test_run_subagent_workflow_runs_stages_and_passes_handoff_context(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -263,6 +328,75 @@ class SubAgentTests(unittest.TestCase):
         self.assertTrue(isolation["created"])
         self.assertTrue(isolation["destroyed"])
         self.assertFalse(Path(isolation["snapshot_workspace"]).exists())
+
+    def test_subagent_structured_summary_is_compacted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            registry = ToolRegistry(
+                workspace=workspace,
+                sandbox=FakeSandbox(workspace),
+                llm=VerboseStructuredSubAgentLlm(),
+                model="fake",
+            )
+
+            result = registry.execute(
+                "run_subagents",
+                {
+                    "tasks": [
+                        {
+                            "name": "verbose",
+                            "task": "return structured summary",
+                            "allowed_tools": ["read_file"],
+                            "path_scope": ["."],
+                            "max_steps": 1,
+                        }
+                    ]
+                },
+            )
+
+        payload = json.loads(result.output)
+        summary = payload["results"][0]["summary"]
+        structured = json.loads(summary)
+        self.assertLessEqual(len(summary), SUBAGENT_SUMMARY_LIMIT)
+        self.assertEqual(set(structured), {"summary", "findings", "handoff", "next"})
+        self.assertLessEqual(len(structured["findings"]), 3)
+        self.assertLessEqual(len(structured["handoff"]), 3)
+        self.assertLessEqual(len(structured["next"]), 3)
+
+    def test_workflow_handoff_context_is_limited(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            registry = ToolRegistry(
+                workspace=workspace,
+                sandbox=FakeSandbox(workspace),
+                llm=VerboseStructuredSubAgentLlm(),
+                model="fake",
+            )
+
+            result = registry.execute(
+                "run_subagent_workflow",
+                {
+                    "stages": [
+                        {
+                            "name": "first",
+                            "nodes": [
+                                {"name": "node_a", "task": "summarize", "path_scope": ["."]},
+                                {"name": "node_b", "task": "summarize", "path_scope": ["."]},
+                                {"name": "node_c", "task": "summarize", "path_scope": ["."]},
+                            ],
+                        },
+                        {
+                            "name": "second",
+                            "nodes": [{"name": "node_d", "task": "summarize", "path_scope": ["."]}],
+                        },
+                    ]
+                },
+            )
+
+        payload = json.loads(result.output)
+        self.assertTrue(result.ok)
+        self.assertLessEqual(len(payload["stages"][0]["handoff_context"]), STAGE_HANDOFF_LIMIT)
+        self.assertLessEqual(len(payload["final_handoff_context"]), STAGE_HANDOFF_LIMIT)
 
     def test_subagent_snapshot_skips_secret_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:

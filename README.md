@@ -189,14 +189,14 @@ flowchart TD
 1. 用户 query 进入单任务 run 或 chat turn 后，先由 `TaskModeRouter` 判断本轮是否需要 subagent。
 2. `off` 直接走默认 agent；`on` 直接进入 subagent planning；`auto` 会先让 DeepSeek 做复杂度判断，只返回模式、原因和 planning hints。
 3. 如果进入 subagent 模式，`PolicyEngine` 会把本轮 required first action 设置成 `plan_subagent_workflow`。
-4. 主 Agent 必须先调用 `plan_subagent_workflow`，自己把任务拆成有序 `stages`，每个 stage 下包含一个或多个可并行的 `nodes`。
+4. 主 Agent 必须先调用 `plan_subagent_workflow`，自己把任务拆成有序 `stages`；当前最多 4 个 stage，每个 stage 最多 3 个可并行 `nodes`。
 5. 每个 node 都要包含 `task`、`context`、`allowed_tools`、`path_scope`、`max_steps`。`context` 是主 Agent 给该 node 的有限上下文。
 6. `plan_subagent_workflow` 只做校验和规范化，不执行子 Agent；它返回 `approved_stages` 和建议的下一步 `run_subagent_workflow` action。
 7. 主 Agent 再调用 `run_subagent_workflow`。每个 stage 内部并行启动多个只读子 Agent；stage 之间串行执行。
 8. 每个子 Agent node 启动时会创建一个独立临时 workspace snapshot，文件类工具只读取该 snapshot，不直接读取或写入本地项目 workspace。
 9. node 完成后，MiniCode 只保留压缩报告和 trace，临时 snapshot 会立即销毁。
-10. 每个 stage 完成后，MiniCode 会把该 stage 的压缩报告合成 `handoff_context`，自动注入到下一 stage 的 node context 中。
-11. 子 Agent 完成后只把压缩报告回传给主 Agent；完整子步骤进入 run log 的 `subagent_trace`。
+10. 每个 stage 完成后，MiniCode 会把该 stage 的结构化压缩报告合成有长度预算的 `handoff_context`，自动注入到下一 stage 的 node context 中。
+11. 子 Agent 完成后只把精简结构化报告回传给主 Agent；完整子步骤进入 run log 的 `subagent_trace`。
 12. 主 Agent 读取 workflow 最终报告后继续决定是否读文件、修改代码、运行测试或最终回答。
 
 ```mermaid
@@ -253,11 +253,14 @@ flowchart TD
 - 主 Agent 仍然负责规划、审批、文件修改、测试、最终回答和质量控制。
 - 主 Agent 必须先调用 `plan_subagent_workflow` 显式拆出 DAG workflow；该 tool 只校验和规范化计划，不执行子 Agent。
 - `plan_subagent_workflow` 返回 approved workflow 后，主 Agent 下一步再调用 `run_subagent_workflow` 执行。
+- workflow 有硬限制：最多 4 个 stage，每个 stage 最多 3 个 node；`max_parallel_per_stage` 也不会超过 3。
 - 子 Agent 默认只允许只读工具：`list_files`、`read_file`、`grep_files`、`search_skills`、`load_skill`、`search_memory`、`load_memory`。
 - 第一版禁止子 Agent 使用 `write_file`、`run_shell`、`run_tests`、`plan_subagents`、`run_subagents`、`plan_subagent_workflow`、`run_subagent_workflow`，避免写文件、shell 副作用和递归调度。
 - 每个 node 都有独立 `task`、`context`、`allowed_tools`、`path_scope` 和 `max_steps`，子 Agent 访问文件时必须落在自己的路径边界内。
 - 每个 node 运行在独立临时 workspace snapshot 中，默认跳过 `.git`、`.minicode`、缓存目录、虚拟环境、`node_modules` 和 secret-like 文件；node 结束后销毁 snapshot。
-- `run_subagent_workflow` 返回给主 Agent 的是每个 stage 的压缩报告和最终 `handoff_context`；完整子步骤写入 run log 的 `subagent_trace`，用于审计和调试。
+- 子 Agent 的最终报告会被规整成 `summary`、`findings`、`handoff`、`next` 四个字段；每类最多保留 3 条，避免把长调查日志传回主 Agent。
+- `handoff_context` 只传递下一阶段需要的压缩结果：单个 node 注入上一阶段 handoff 最多约 1200 字符，stage handoff 最多约 1500 字符，最终 handoff 最多约 2000 字符。
+- `run_subagent_workflow` 返回给主 Agent 的是每个 stage 的结构化压缩报告和最终 `handoff_context`；完整子步骤写入 run log 的 `subagent_trace`，用于审计和调试。
 
 运行方式：
 
@@ -1016,6 +1019,7 @@ flowchart TD
   - 参数：`goal`、`tasks`、`max_parallel`
   - 作用：由主 Agent 显式规划子 Agent 任务，校验并规范化 `task`、`context`、`allowed_tools`、`path_scope`、`max_steps`。
   - 执行位置：本地 runtime，不会启动子 Agent。
+  - 限制：最多 3 个 task，`max_parallel` 最多 3。
   - 安全策略：执行前检查子任务结构、禁用工具和路径边界；计划中不能包含写文件、shell、测试或递归 subagent 权限。
   - 返回：`approved_tasks` 和建议的下一步 `run_subagents` action。
 
@@ -1023,6 +1027,7 @@ flowchart TD
   - 参数：`tasks`、`max_parallel`
   - 作用：以 tool call 方式并行唤醒多个只读子 Agent，分别完成局部调查，再把压缩报告统一回传给主 Agent。
   - 执行位置：本地 runtime；每个子 Agent 使用独立临时 workspace snapshot，文件类工具只读 snapshot。
+  - 限制：最多 3 个 task，子 Agent 输出会压缩为 `summary/findings/handoff/next`。
   - 安全策略：执行前检查子任务结构、禁用工具和路径边界；第一版禁止子 Agent 写文件、执行 shell、跑测试、规划 subagent 或递归唤醒子 Agent。
   - 日志：完整子步骤写入 run log 的 `subagent_trace`。
 
@@ -1030,6 +1035,7 @@ flowchart TD
   - 参数：`goal`、`stages`、`max_parallel_per_stage`
   - 作用：由主 Agent 显式规划 DAG 型 subagent workflow。每个 stage 包含多个可并行 node，stage 之间串行传递有限 handoff context。
   - 执行位置：本地 runtime，不会启动子 Agent。
+  - 限制：最多 4 个 stage，每个 stage 最多 3 个 node。
   - 安全策略：校验每个 stage / node 的结构、禁用工具和路径边界。
   - 返回：`approved_stages` 和建议的下一步 `run_subagent_workflow` action。
 
@@ -1037,6 +1043,7 @@ flowchart TD
   - 参数：`stages`、`max_parallel_per_stage`
   - 作用：执行 approved DAG workflow。同一 stage 内 node 并行执行；每个 stage 完成后生成 `handoff_context` 并传给下一 stage。
   - 执行位置：本地 runtime；每个 node 内部是受限只读子 Agent loop，并使用独立临时 workspace snapshot。
+  - 限制：最多 4 个 stage，每个 stage 最多 3 个 node；stage handoff 最多约 1500 字符。
   - 安全策略：执行前再次检查 stage / node 结构、禁用工具和路径边界。
   - 日志：完整 workflow stage、node、step trace 写入 run log 的 `subagent_trace`。
 
