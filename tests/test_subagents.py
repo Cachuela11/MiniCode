@@ -55,6 +55,14 @@ class SubAgentLlm:
                         "args": {"answer": "no useful report"},
                     }
                 )
+        elif "list workspace" in text:
+            content = json.dumps(
+                {
+                    "thought": "list files",
+                    "action": "list_files",
+                    "args": {"path": ".", "max_depth": 1, "limit": 20},
+                }
+            )
         elif "inspect source" in text:
             content = json.dumps(
                 {
@@ -250,6 +258,41 @@ class SubAgentTests(unittest.TestCase):
         self.assertIn("test report", result.output)
         self.assertIsNotNone(result.subagent_trace)
         self.assertEqual(len(result.subagent_trace["results"]), 2)
+        isolation = result.subagent_trace["results"][0]["workspace_isolation"]
+        self.assertEqual(isolation["mode"], "snapshot")
+        self.assertTrue(isolation["created"])
+        self.assertTrue(isolation["destroyed"])
+        self.assertFalse(Path(isolation["snapshot_workspace"]).exists())
+
+    def test_subagent_snapshot_skips_secret_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / ".env").write_text("SECRET=1\n", encoding="utf-8")
+            (workspace / "README.md").write_text("public\n", encoding="utf-8")
+            registry = ToolRegistry(
+                workspace=workspace,
+                sandbox=FakeSandbox(workspace),
+                llm=SubAgentLlm(),
+                model="fake",
+            )
+
+            result = registry.execute(
+                "run_subagents",
+                {
+                    "tasks": [
+                        {
+                            "name": "inspect_readme",
+                            "task": "list workspace",
+                            "allowed_tools": ["list_files"],
+                            "path_scope": ["."],
+                            "max_steps": 1,
+                        }
+                    ]
+                },
+            )
+
+        trace = result.subagent_trace["results"][0]["trace"][0]
+        self.assertNotIn(".env", trace["output_preview"])
 
     def test_security_rejects_forbidden_subagent_tool(self):
         with tempfile.TemporaryDirectory() as temp_dir:

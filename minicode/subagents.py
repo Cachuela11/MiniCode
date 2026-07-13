@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import fnmatch
 import json
+import os
 import re
+import shutil
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -29,6 +33,20 @@ FORBIDDEN_SUBAGENT_TOOLS = {
     "plan_subagent_workflow",
     "run_subagent_workflow",
 }
+SNAPSHOT_IGNORED_DIRS = {
+    ".git",
+    ".minicode",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".venv",
+    "venv",
+    "node_modules",
+    "dist",
+    "build",
+}
+SNAPSHOT_IGNORED_PATTERNS = {"*.pyc", "*.pyo", "*.egg-info"}
 
 
 @dataclass(frozen=True)
@@ -72,6 +90,7 @@ class SubAgentResult:
     token_usage: TokenUsage = field(default_factory=TokenUsage)
     duration_ms: int = 0
     error: str = ""
+    workspace_isolation: dict[str, Any] = field(default_factory=dict)
 
     def to_observation_dict(self) -> dict[str, Any]:
         return {
@@ -86,6 +105,7 @@ class SubAgentResult:
             "token_usage": asdict(self.token_usage),
             "duration_ms": self.duration_ms,
             "error": self.error,
+            "workspace_isolation": self.workspace_isolation,
         }
 
     def to_log_dict(self) -> dict[str, Any]:
@@ -234,6 +254,7 @@ class SubAgentRunner:
                         allowed_tools=task.allowed_tools,
                         path_scope=task.path_scope,
                         error=str(exc),
+                        workspace_isolation={"mode": "snapshot", "created": False, "destroyed": True},
                     )
             results = [ordered[index] for index in sorted(ordered)]
 
@@ -250,11 +271,40 @@ class SubAgentRunner:
 
     def run_one(self, task: SubAgentTask) -> SubAgentResult:
         timer = Timer()
+        temp_dir = tempfile.TemporaryDirectory(prefix="minicode-subagent-")
+        snapshot_workspace = Path(temp_dir.name) / "workspace"
+        isolation = {
+            "mode": "snapshot",
+            "source_workspace": str(self.workspace),
+            "snapshot_workspace": str(snapshot_workspace),
+            "created": False,
+            "destroyed": False,
+            "ignored_dirs": sorted(SNAPSHOT_IGNORED_DIRS),
+        }
+        result: SubAgentResult | None = None
+        try:
+            _copy_workspace_snapshot(self.workspace, snapshot_workspace)
+            isolation["created"] = True
+            result = self._run_one_in_workspace(task, snapshot_workspace, timer, isolation)
+            return result
+        finally:
+            temp_dir.cleanup()
+            isolation["destroyed"] = True
+            if result is not None:
+                result.workspace_isolation = dict(isolation)
+
+    def _run_one_in_workspace(
+        self,
+        task: SubAgentTask,
+        workspace: Path,
+        timer: Timer,
+        isolation: dict[str, Any],
+    ) -> SubAgentResult:
         allowed_tools = _normalize_allowed_tools(task.allowed_tools)
         path_scope = _normalize_path_scope(task.path_scope)
         executor = ScopedToolExecutor(
             parent=self.tools,
-            workspace=self.workspace,
+            workspace=workspace,
             allowed_tools=allowed_tools,
             path_scope=path_scope,
         )
@@ -266,6 +316,7 @@ class SubAgentRunner:
             summary="",
             allowed_tools=allowed_tools,
             path_scope=path_scope,
+            workspace_isolation=dict(isolation),
         )
         messages = [
             {
@@ -428,6 +479,12 @@ class ScopedToolExecutor:
                 return _blocked_tool_result(
                     f"ERROR: subagent path {raw_path!r} is outside allowed scope: {', '.join(self.path_scope)}"
                 )
+            if name == "list_files":
+                return self._list_files(args)
+            if name == "read_file":
+                return self._read_file(args)
+            if name == "grep_files":
+                return self._grep_files(args)
         return self.parent.execute(name, args)
 
     def _path_allowed(self, raw_path: str) -> bool:
@@ -436,6 +493,79 @@ class ScopedToolExecutor:
         except ValueError:
             return False
         return any(candidate == scope or scope in candidate.parents for scope in self._resolved_scopes)
+
+    def _list_files(self, args: dict[str, Any]):
+        root = self._resolve_path(str(args.get("path", ".")))
+        max_depth = _as_int(args.get("max_depth", 2), default=2, minimum=0, maximum=20)
+        limit = _as_int(args.get("limit", 100), default=100, minimum=1, maximum=1000)
+
+        rows: list[str] = []
+        root_depth = len(root.relative_to(self.workspace).parts)
+        for current, dirs, files in os.walk(root):
+            current_path = Path(current)
+            rel_depth = len(current_path.relative_to(self.workspace).parts) - root_depth
+            if rel_depth >= max_depth:
+                dirs[:] = []
+            dirs[:] = [name for name in sorted(dirs) if name not in SNAPSHOT_IGNORED_DIRS]
+            for filename in sorted(files):
+                path = current_path / filename
+                rel = path.relative_to(self.workspace).as_posix()
+                if _is_secret_path(rel) or _matches_ignored_pattern(filename):
+                    continue
+                rows.append(rel)
+                if len(rows) >= limit:
+                    output = "\n".join(rows)
+                    return _tool_result(True, output, exit_code=0)
+        output = "\n".join(rows) or "No files found."
+        return _tool_result(True, output, exit_code=0)
+
+    def _read_file(self, args: dict[str, Any]):
+        path = self._resolve_path(str(args.get("path", "")))
+        rel = path.relative_to(self.workspace).as_posix()
+        if _is_secret_path(rel):
+            return _blocked_tool_result(f"ERROR: subagent cannot read secret-like file: {rel}")
+        if not path.is_file():
+            return _tool_result(False, f"ERROR: file not found: {rel}", exit_code=1)
+        start_line = _as_int(args.get("start_line", 1), default=1, minimum=1, maximum=1_000_000)
+        limit = _as_int(args.get("limit", 120), default=120, minimum=1, maximum=2000)
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        selected = lines[start_line - 1 : start_line - 1 + limit]
+        output = "\n".join(f"{index}: {line}" for index, line in enumerate(selected, start=start_line))
+        return _tool_result(True, output or "File is empty or range has no lines.", exit_code=0)
+
+    def _grep_files(self, args: dict[str, Any]):
+        pattern = str(args.get("pattern", "")).strip()
+        if not pattern:
+            return _tool_result(False, "ERROR: grep_files requires args.pattern.", exit_code=2, invalid=True)
+        root = self._resolve_path(str(args.get("path", ".")))
+        limit = _as_int(args.get("limit", 100), default=100, minimum=1, maximum=1000)
+        flags = 0 if bool(args.get("case_sensitive", False)) else re.IGNORECASE
+        try:
+            regex = re.compile(pattern, flags=flags)
+        except re.error as exc:
+            return _tool_result(False, f"ERROR: invalid regex pattern: {exc}", exit_code=2, invalid=True)
+
+        files = [root] if root.is_file() else sorted(path for path in root.rglob("*") if path.is_file())
+        rows: list[str] = []
+        for path in files:
+            if _should_skip_snapshot_file(path, self.workspace):
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            rel = path.relative_to(self.workspace).as_posix()
+            for line_number, line in enumerate(lines, start=1):
+                if regex.search(line):
+                    rows.append(f"{rel}:{line_number}: {line}")
+                    if len(rows) >= limit:
+                        return _tool_result(True, "\n".join(rows), exit_code=0)
+        return _tool_result(True, "\n".join(rows) or "No matches found.", exit_code=0)
+
+    def _resolve_path(self, raw_path: str) -> Path:
+        if not raw_path:
+            raise ValueError("path is required")
+        return _resolve_under_workspace(self.workspace, raw_path)
 
 
 def parse_subagent_tasks(args: dict[str, Any]) -> tuple[list[SubAgentTask], str]:
@@ -597,6 +727,74 @@ def _resolve_under_workspace(workspace: Path, raw_path: str) -> Path:
     raise ValueError(f"path escapes workspace: {raw_path}")
 
 
+def _copy_workspace_snapshot(source: Path, target: Path) -> None:
+    target.mkdir(parents=True, exist_ok=True)
+    for item in source.iterdir():
+        if _should_skip_snapshot_item(item, source):
+            continue
+        destination = target / item.name
+        if item.is_dir():
+            shutil.copytree(item, destination, ignore=_snapshot_ignore)
+        elif item.is_file():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, destination)
+
+
+def _snapshot_ignore(directory: str, names: list[str]) -> set[str]:
+    ignored: set[str] = set()
+    base = Path(directory)
+    for name in names:
+        path = base / name
+        if _should_skip_snapshot_item(path, base):
+            ignored.add(name)
+    return ignored
+
+
+def _should_skip_snapshot_item(path: Path, root: Path) -> bool:
+    name = path.name
+    if name in SNAPSHOT_IGNORED_DIRS:
+        return True
+    if _matches_ignored_pattern(name):
+        return True
+    try:
+        rel = path.relative_to(root).as_posix()
+    except ValueError:
+        rel = name
+    if _is_secret_path(rel):
+        return True
+    return False
+
+
+def _should_skip_snapshot_file(path: Path, workspace: Path) -> bool:
+    try:
+        rel_parts = path.relative_to(workspace).parts
+        rel = path.relative_to(workspace).as_posix()
+    except ValueError:
+        return True
+    if any(part in SNAPSHOT_IGNORED_DIRS for part in rel_parts):
+        return True
+    if _is_secret_path(rel) or _matches_ignored_pattern(path.name):
+        return True
+    try:
+        return path.stat().st_size > 1_000_000
+    except OSError:
+        return True
+
+
+def _matches_ignored_pattern(name: str) -> bool:
+    return any(fnmatch.fnmatch(name, pattern) for pattern in SNAPSHOT_IGNORED_PATTERNS)
+
+
+def _is_secret_path(rel_path: str) -> bool:
+    path = rel_path.replace("\\", "/").lower()
+    name = path.rsplit("/", 1)[-1]
+    if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
+        return True
+    if name in {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}:
+        return True
+    return name.endswith((".pem", ".key", ".p12", ".pfx"))
+
+
 def _blocked_tool_result(message: str):
     from .tools import ToolResult
 
@@ -608,6 +806,19 @@ def _blocked_tool_result(message: str):
         permission_decision="deny",
         permission_reason="subagent scope denied",
         invalid_command=True,
+    )
+
+
+def _tool_result(ok: bool, output: str, *, exit_code: int | None, invalid: bool = False):
+    from .tools import ToolResult
+
+    return ToolResult(
+        ok,
+        output,
+        stdout=output if ok else "",
+        stderr="" if ok else output,
+        exit_code=exit_code,
+        invalid_command=invalid,
     )
 
 
