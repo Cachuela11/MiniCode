@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from .permissions import Decision
-from .subagents import MAX_STAGE_NODES, MAX_WORKFLOW_STAGES
+from .subagents import (
+    MAX_EDGE_TRAVERSALS,
+    MAX_STAGE_EDGES,
+    MAX_STAGE_NODES,
+    MAX_STAGE_WORKFLOW_ITERATIONS,
+    MAX_WORKFLOW_STAGES,
+)
 
 
 @dataclass(frozen=True)
@@ -142,6 +148,90 @@ class ToolSecurityReviewer:
                     f"workflow stage #{stage_index}: {review.reason}",
                     dangerous=review.dangerous,
                     invalid=review.invalid,
+                )
+            graph_review = self._review_stage_control_graph(tool_name, risk, stage, nodes, stage_index)
+            if graph_review.decision != Decision.ALLOW:
+                return graph_review
+        return self._allow(tool_name, risk, "security review passed")
+
+    def _review_stage_control_graph(
+        self,
+        tool_name: str,
+        risk: ToolRisk,
+        stage: dict[str, Any],
+        nodes: Any,
+        stage_index: int,
+    ) -> SecurityReviewResult:
+        raw_edges = stage.get("edges")
+        if raw_edges is None:
+            raw_edges = stage.get("control_edges")
+        if raw_edges is None:
+            return self._allow(tool_name, risk, "security review passed")
+        if not isinstance(raw_edges, list):
+            return self._deny(tool_name, risk, f"workflow stage #{stage_index}: edges must be a list", invalid=True)
+        if len(raw_edges) > MAX_STAGE_EDGES:
+            return self._deny(
+                tool_name,
+                risk,
+                f"workflow stage #{stage_index}: supports at most {MAX_STAGE_EDGES} edges",
+                invalid=True,
+            )
+        max_iterations = stage.get("max_iterations", 1)
+        if max_iterations is not None:
+            try:
+                parsed_iterations = int(max_iterations)
+            except (TypeError, ValueError):
+                return self._deny(
+                    tool_name,
+                    risk,
+                    f"workflow stage #{stage_index}: max_iterations must be an integer",
+                    invalid=True,
+                )
+            if parsed_iterations < 1 or parsed_iterations > MAX_STAGE_WORKFLOW_ITERATIONS:
+                return self._deny(
+                    tool_name,
+                    risk,
+                    f"workflow stage #{stage_index}: max_iterations must be 1-{MAX_STAGE_WORKFLOW_ITERATIONS}",
+                    invalid=True,
+                )
+        node_names = {_security_slugify(str(node.get("name") or f"subagent_{index}")) for index, node in enumerate(nodes, start=1)}
+        for edge_index, edge in enumerate(raw_edges, start=1):
+            if not isinstance(edge, dict):
+                return self._deny(tool_name, risk, f"workflow stage #{stage_index}: edge #{edge_index} must be an object", invalid=True)
+            from_raw = edge.get("from") or edge.get("from_node")
+            to_raw = edge.get("to") or edge.get("to_node")
+            if not isinstance(from_raw, str) or not from_raw.strip() or not isinstance(to_raw, str) or not to_raw.strip():
+                return self._deny(
+                    tool_name,
+                    risk,
+                    f"workflow stage #{stage_index}: edge #{edge_index} requires string from and to",
+                    invalid=True,
+                )
+            from_node = _security_slugify(from_raw)
+            to_node = _security_slugify(to_raw)
+            if from_node not in node_names or to_node not in node_names:
+                return self._deny(
+                    tool_name,
+                    risk,
+                    f"workflow stage #{stage_index}: edge #{edge_index} references unknown node",
+                    invalid=True,
+                )
+            max_traversals = edge.get("max_traversals", 1)
+            try:
+                parsed_traversals = int(max_traversals)
+            except (TypeError, ValueError):
+                return self._deny(
+                    tool_name,
+                    risk,
+                    f"workflow stage #{stage_index}: edge #{edge_index} max_traversals must be an integer",
+                    invalid=True,
+                )
+            if parsed_traversals < 1 or parsed_traversals > MAX_EDGE_TRAVERSALS:
+                return self._deny(
+                    tool_name,
+                    risk,
+                    f"workflow stage #{stage_index}: edge #{edge_index} max_traversals must be 1-{MAX_EDGE_TRAVERSALS}",
+                    invalid=True,
                 )
         return self._allow(tool_name, risk, "security review passed")
 
@@ -288,3 +378,8 @@ def _reads_secret_in_shell(command: str) -> bool:
             re.compile(r"\.(pem|key|p12|pfx)\b"),
         ]
     )
+
+
+def _security_slugify(value: str) -> str:
+    slug = re.sub(r"[^0-9A-Za-z_.-]+", "_", value.strip()).strip("_.-").lower()
+    return slug or "subagent"

@@ -49,6 +49,9 @@ SNAPSHOT_IGNORED_DIRS = {
 SNAPSHOT_IGNORED_PATTERNS = {"*.pyc", "*.pyo", "*.egg-info"}
 MAX_WORKFLOW_STAGES = 4
 MAX_STAGE_NODES = 3
+MAX_STAGE_EDGES = 6
+MAX_STAGE_WORKFLOW_ITERATIONS = 6
+MAX_EDGE_TRAVERSALS = 2
 SUBAGENT_CONTEXT_LIMIT = 1200
 SUBAGENT_SUMMARY_LIMIT = 800
 NODE_HANDOFF_LIMIT = 1200
@@ -148,9 +151,20 @@ class SubAgentBatchResult:
 
 
 @dataclass(frozen=True)
+class SubAgentWorkflowEdge:
+    from_node: str
+    to_node: str
+    condition: str = "always"
+    max_traversals: int = 1
+
+
+@dataclass(frozen=True)
 class SubAgentWorkflowStage:
     name: str
     nodes: list[SubAgentTask]
+    edges: list[SubAgentWorkflowEdge] = field(default_factory=list)
+    entry_nodes: list[str] = field(default_factory=list)
+    max_iterations: int = 4
 
 
 @dataclass
@@ -160,6 +174,7 @@ class SubAgentWorkflowStageResult:
     status: str
     results: list[SubAgentResult]
     handoff_context: str
+    control_flow: dict[str, Any] = field(default_factory=dict)
     token_usage: TokenUsage = field(default_factory=TokenUsage)
     duration_ms: int = 0
 
@@ -169,6 +184,7 @@ class SubAgentWorkflowStageResult:
             "name": self.name,
             "status": self.status,
             "handoff_context": self.handoff_context,
+            "control_flow": self.control_flow,
             "results": [result.to_observation_dict() for result in self.results],
             "token_usage": asdict(self.token_usage),
             "duration_ms": self.duration_ms,
@@ -419,13 +435,7 @@ class SubAgentWorkflowRunner:
 
         for index, stage in enumerate(stages, start=1):
             stage_timer = Timer()
-            nodes = [_with_handoff_context(node, handoff_context) for node in stage.nodes]
-            batch = SubAgentRunner(
-                llm=self.llm,
-                model=self.model,
-                tools=self.tools,
-                max_parallel=self.max_parallel_per_stage,
-            ).run_many(nodes)
+            batch, control_flow = self._run_stage(stage, handoff_context)
             workflow_usage.add(batch.token_usage)
             handoff_context = _stage_handoff_context(stage.name, batch.results)
             stage_result = SubAgentWorkflowStageResult(
@@ -434,6 +444,7 @@ class SubAgentWorkflowRunner:
                 status=batch.status,
                 results=batch.results,
                 handoff_context=handoff_context,
+                control_flow=control_flow,
                 token_usage=batch.token_usage,
                 duration_ms=stage_timer.elapsed_ms(),
             )
@@ -446,6 +457,114 @@ class SubAgentWorkflowRunner:
             final_handoff_context=_preview(handoff_context, FINAL_HANDOFF_LIMIT),
             token_usage=workflow_usage,
             duration_ms=timer.elapsed_ms(),
+        )
+
+    def _run_stage(self, stage: SubAgentWorkflowStage, prior_handoff_context: str) -> tuple[SubAgentBatchResult, dict[str, Any]]:
+        if not stage.edges:
+            nodes = [_with_handoff_context(node, prior_handoff_context) for node in stage.nodes]
+            batch = SubAgentRunner(
+                llm=self.llm,
+                model=self.model,
+                tools=self.tools,
+                max_parallel=self.max_parallel_per_stage,
+            ).run_many(nodes)
+            return batch, {"mode": "parallel", "iterations": 1 if nodes else 0, "events": []}
+        return self._run_controlled_stage(stage, prior_handoff_context)
+
+    def _run_controlled_stage(
+        self,
+        stage: SubAgentWorkflowStage,
+        prior_handoff_context: str,
+    ) -> tuple[SubAgentBatchResult, dict[str, Any]]:
+        timer = Timer()
+        runner = SubAgentRunner(
+            llm=self.llm,
+            model=self.model,
+            tools=self.tools,
+            max_parallel=self.max_parallel_per_stage,
+        )
+        nodes_by_name = {node.name: node for node in stage.nodes}
+        outgoing: dict[str, list[SubAgentWorkflowEdge]] = {name: [] for name in nodes_by_name}
+        incoming: dict[str, int] = {name: 0 for name in nodes_by_name}
+        for edge in stage.edges:
+            outgoing.setdefault(edge.from_node, []).append(edge)
+            incoming[edge.to_node] = incoming.get(edge.to_node, 0) + 1
+
+        ready = list(stage.entry_nodes or [name for name, count in incoming.items() if count == 0])
+        if not ready and stage.nodes:
+            ready = [stage.nodes[0].name]
+
+        results: list[SubAgentResult] = []
+        token_usage = TokenUsage()
+        traversals: dict[str, int] = {}
+        visits: dict[str, int] = {name: 0 for name in nodes_by_name}
+        events: list[dict[str, Any]] = []
+        stage_context = ""
+        iteration = 0
+
+        while ready and iteration < stage.max_iterations:
+            iteration += 1
+            wave_names = _dedupe_names([name for name in ready if name in nodes_by_name])
+            ready = []
+            tasks = []
+            for name in wave_names:
+                visits[name] += 1
+                tasks.append(_with_stage_context(_with_handoff_context(nodes_by_name[name], prior_handoff_context), stage_context))
+            batch = runner.run_many(tasks)
+            token_usage.add(batch.token_usage)
+            results.extend(batch.results)
+            events.append({"iteration": iteration, "nodes": wave_names, "status": batch.status})
+            stage_context = _stage_handoff_context(stage.name, results)
+
+            for result in batch.results:
+                for edge in outgoing.get(result.name, []):
+                    edge_key = f"{edge.from_node}->{edge.to_node}:{edge.condition}"
+                    used = traversals.get(edge_key, 0)
+                    if used >= edge.max_traversals:
+                        events.append(
+                            {
+                                "iteration": iteration,
+                                "edge": edge_key,
+                                "decision": "blocked",
+                                "reason": "max_traversals reached",
+                            }
+                        )
+                        continue
+                    if not _edge_condition_matches(edge.condition, result):
+                        events.append({"iteration": iteration, "edge": edge_key, "decision": "skipped"})
+                        continue
+                    traversals[edge_key] = used + 1
+                    ready.append(edge.to_node)
+                    events.append({"iteration": iteration, "edge": edge_key, "decision": "taken"})
+
+        stopped_by_guard = bool(ready)
+        if stopped_by_guard:
+            events.append(
+                {
+                    "iteration": iteration,
+                    "decision": "stopped",
+                    "reason": "stage max_iterations reached; returning partial result to main agent",
+                    "pending_nodes": ready,
+                }
+            )
+
+        status = "completed" if results and not stopped_by_guard and all(result.status == "completed" for result in results) else "partial"
+        return (
+            SubAgentBatchResult(
+                status=status,
+                results=results,
+                token_usage=token_usage,
+                duration_ms=timer.elapsed_ms(),
+            ),
+            {
+                "mode": "controlled_graph",
+                "iterations": iteration,
+                "max_iterations": stage.max_iterations,
+                "edge_traversals": traversals,
+                "node_visits": visits,
+                "stopped_by_guard": stopped_by_guard,
+                "events": events,
+            },
         )
 
 
@@ -628,8 +747,101 @@ def parse_subagent_workflow(args: dict[str, Any]) -> tuple[list[SubAgentWorkflow
         nodes, error = parse_subagent_tasks({"tasks": raw_nodes})
         if error:
             return [], f"workflow stage #{index}: {error}"
-        stages.append(SubAgentWorkflowStage(name=name, nodes=nodes))
+        edges, edge_error = _parse_stage_edges(item, nodes)
+        if edge_error:
+            return [], f"workflow stage #{index}: {edge_error}"
+        entry_nodes, entry_error = _parse_entry_nodes(item, nodes, edges)
+        if entry_error:
+            return [], f"workflow stage #{index}: {entry_error}"
+        max_iterations = _as_int(
+            item.get("max_iterations"),
+            default=min(MAX_STAGE_WORKFLOW_ITERATIONS, max(1, len(nodes) + len(edges))),
+            minimum=1,
+            maximum=MAX_STAGE_WORKFLOW_ITERATIONS,
+        )
+        stages.append(
+            SubAgentWorkflowStage(
+                name=name,
+                nodes=nodes,
+                edges=edges,
+                entry_nodes=entry_nodes,
+                max_iterations=max_iterations,
+            )
+        )
     return stages, ""
+
+
+def _parse_stage_edges(item: dict[str, Any], nodes: list[SubAgentTask]) -> tuple[list[SubAgentWorkflowEdge], str]:
+    raw_edges = item.get("edges")
+    if raw_edges is None:
+        raw_edges = item.get("control_edges")
+    if raw_edges is None:
+        return [], ""
+    if not isinstance(raw_edges, list):
+        return [], "stage edges must be a list"
+    if len(raw_edges) > MAX_STAGE_EDGES:
+        return [], f"stage supports at most {MAX_STAGE_EDGES} control edges"
+
+    node_names = {node.name for node in nodes}
+    edges: list[SubAgentWorkflowEdge] = []
+    for edge_index, raw_edge in enumerate(raw_edges, start=1):
+        if not isinstance(raw_edge, dict):
+            return [], f"edge #{edge_index} must be an object"
+        from_raw = raw_edge.get("from") or raw_edge.get("from_node")
+        to_raw = raw_edge.get("to") or raw_edge.get("to_node")
+        if not isinstance(from_raw, str) or not from_raw.strip() or not isinstance(to_raw, str) or not to_raw.strip():
+            return [], f"edge #{edge_index} requires from and to"
+        from_node = _slugify(from_raw)
+        to_node = _slugify(to_raw)
+        if from_node not in node_names or to_node not in node_names:
+            return [], f"edge #{edge_index} references unknown node: {from_node}->{to_node}"
+        condition = _preview(str(raw_edge.get("condition") or "always"), 240)
+        max_traversals = _as_int(
+            raw_edge.get("max_traversals"),
+            default=1,
+            minimum=1,
+            maximum=MAX_EDGE_TRAVERSALS,
+        )
+        edges.append(
+            SubAgentWorkflowEdge(
+                from_node=from_node,
+                to_node=to_node,
+                condition=condition,
+                max_traversals=max_traversals,
+            )
+        )
+    return edges, ""
+
+
+def _parse_entry_nodes(
+    item: dict[str, Any],
+    nodes: list[SubAgentTask],
+    edges: list[SubAgentWorkflowEdge],
+) -> tuple[list[str], str]:
+    node_names = {node.name for node in nodes}
+    raw_entries = item.get("entry_nodes")
+    if raw_entries is None:
+        raw_entries = item.get("entry")
+    if raw_entries is None:
+        entries = []
+    elif isinstance(raw_entries, str):
+        entries = [_slugify(raw_entries)]
+    elif isinstance(raw_entries, list):
+        entries = [_slugify(str(entry)) for entry in raw_entries]
+    else:
+        return [], "entry_nodes must be a string or list"
+    entries = _dedupe_names([entry for entry in entries if entry])
+    unknown = [entry for entry in entries if entry not in node_names]
+    if unknown:
+        return [], f"entry_nodes reference unknown nodes: {', '.join(unknown)}"
+    if edges and not entries:
+        incoming = {node.name: 0 for node in nodes}
+        for edge in edges:
+            incoming[edge.to_node] = incoming.get(edge.to_node, 0) + 1
+        entries = [name for name, count in incoming.items() if count == 0]
+        if not entries:
+            return [], "controlled stage with cycles requires explicit entry_nodes"
+    return entries, ""
 
 
 def _subagent_system_prompt(tool_descriptions: str) -> str:
@@ -697,6 +909,27 @@ def _with_handoff_context(task: SubAgentTask, handoff_context: str) -> SubAgentT
         for part in [
             task.context.strip(),
             "Previous stage handoff context:\n" + _preview(handoff_context, NODE_HANDOFF_LIMIT),
+        ]
+        if part
+    )
+    return SubAgentTask(
+        name=task.name,
+        task=task.task,
+        context=merged_context,
+        allowed_tools=task.allowed_tools,
+        path_scope=task.path_scope,
+        max_steps=task.max_steps,
+    )
+
+
+def _with_stage_context(task: SubAgentTask, stage_context: str) -> SubAgentTask:
+    if not stage_context:
+        return task
+    merged_context = "\n\n".join(
+        part
+        for part in [
+            task.context.strip(),
+            "Current stage workflow context:\n" + _preview(stage_context, NODE_HANDOFF_LIMIT),
         ]
         if part
     )
@@ -800,6 +1033,70 @@ def _fit_summary_json(payload: dict[str, Any], limit: int) -> str:
         return encoded
     minimal = {"summary": _preview(str(compact.get("summary") or ""), 120), "findings": [], "handoff": [], "next": []}
     return json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
+
+
+def _edge_condition_matches(condition: str, result: SubAgentResult) -> bool:
+    normalized = " ".join(str(condition or "always").lower().split())
+    summary = _result_summary_text(result)
+    if normalized in {"", "always", "true", "on_complete", "on_completed"}:
+        return True
+    if normalized in {"on_success", "success", "completed"}:
+        return result.status == "completed"
+    if normalized in {"on_failure", "failure", "failed", "error"}:
+        return result.status != "completed"
+    if normalized.startswith("contains:"):
+        needle = normalized.split(":", 1)[1].strip()
+        return bool(needle and needle in summary)
+    if normalized.startswith("not_contains:"):
+        needle = normalized.split(":", 1)[1].strip()
+        return bool(needle and needle not in summary)
+    if normalized in {"resolved", "if_resolved"}:
+        return result.status == "completed" and not _looks_unresolved(summary)
+    if normalized in {"unresolved", "if_unresolved", "needs_user", "blocked"}:
+        return result.status != "completed" or _looks_unresolved(summary)
+    if any(term in normalized for term in ["issue", "bug", "problem", "risk", "error", "失败", "问题", "风险"]):
+        return any(term in summary for term in ["issue", "bug", "problem", "risk", "error", "fail", "失败", "问题", "风险"])
+    return False
+
+
+def _result_summary_text(result: SubAgentResult) -> str:
+    payload = _load_summary_payload(result.summary)
+    if payload:
+        parts = [str(payload.get("summary") or "")]
+        for key in ["findings", "handoff", "next"]:
+            parts.append(json.dumps(payload.get(key) or [], ensure_ascii=False))
+        return " ".join(parts).lower()
+    return str(result.summary or "").lower()
+
+
+def _looks_unresolved(summary: str) -> bool:
+    return any(
+        term in summary
+        for term in [
+            "unresolved",
+            "unknown",
+            "blocked",
+            "cannot",
+            "no useful",
+            "max steps",
+            "needs user",
+            "无法",
+            "未知",
+            "阻塞",
+            "需要用户",
+        ]
+    )
+
+
+def _dedupe_names(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def _normalize_allowed_tools(value: Any) -> list[str]:

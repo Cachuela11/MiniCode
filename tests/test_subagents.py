@@ -246,6 +246,113 @@ class SubAgentTests(unittest.TestCase):
         self.assertIsNotNone(result.subagent_trace)
         self.assertEqual(len(result.subagent_trace["stages"]), 2)
 
+    def test_stage_control_edges_run_serial_nodes_inside_one_stage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "minicode").mkdir()
+            (workspace / "tests").mkdir()
+            (workspace / "minicode" / "source.py").write_text("source-value = 1\n", encoding="utf-8")
+            (workspace / "tests" / "test_source.py").write_text("test-value = 1\n", encoding="utf-8")
+            registry = ToolRegistry(
+                workspace=workspace,
+                sandbox=FakeSandbox(workspace),
+                llm=SubAgentLlm(),
+                model="fake",
+            )
+
+            result = registry.execute(
+                "run_subagent_workflow",
+                {
+                    "stages": [
+                        {
+                            "name": "controlled",
+                            "nodes": [
+                                {
+                                    "name": "inspect_source",
+                                    "task": "inspect source",
+                                    "allowed_tools": ["read_file"],
+                                    "path_scope": ["minicode/"],
+                                    "max_steps": 3,
+                                },
+                                {
+                                    "name": "inspect_tests",
+                                    "task": "inspect tests",
+                                    "allowed_tools": ["read_file"],
+                                    "path_scope": ["tests/"],
+                                    "max_steps": 3,
+                                },
+                            ],
+                            "entry_nodes": ["inspect_source"],
+                            "edges": [
+                                {
+                                    "from": "inspect_source",
+                                    "to": "inspect_tests",
+                                    "condition": "on_success",
+                                    "max_traversals": 1,
+                                }
+                            ],
+                            "max_iterations": 3,
+                        }
+                    ],
+                    "max_parallel_per_stage": 2,
+                },
+            )
+
+        payload = json.loads(result.output)
+        self.assertTrue(result.ok)
+        stage = payload["stages"][0]
+        self.assertEqual(stage["control_flow"]["mode"], "controlled_graph")
+        self.assertEqual(stage["control_flow"]["iterations"], 2)
+        self.assertEqual([item["name"] for item in stage["results"]], ["inspect_source", "inspect_tests"])
+
+    def test_stage_loop_stops_at_max_iterations(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "README.md").write_text("public\n", encoding="utf-8")
+            registry = ToolRegistry(
+                workspace=workspace,
+                sandbox=FakeSandbox(workspace),
+                llm=VerboseStructuredSubAgentLlm(),
+                model="fake",
+            )
+
+            result = registry.execute(
+                "run_subagent_workflow",
+                {
+                    "stages": [
+                        {
+                            "name": "loop_guard",
+                            "nodes": [
+                                {
+                                    "name": "retry_node",
+                                    "task": "return structured summary",
+                                    "allowed_tools": ["list_files"],
+                                    "path_scope": ["."],
+                                    "max_steps": 1,
+                                }
+                            ],
+                            "entry_nodes": ["retry_node"],
+                            "edges": [
+                                {
+                                    "from": "retry_node",
+                                    "to": "retry_node",
+                                    "condition": "always",
+                                    "max_traversals": 2,
+                                }
+                            ],
+                            "max_iterations": 1,
+                        }
+                    ]
+                },
+            )
+
+        payload = json.loads(result.output)
+        stage = payload["stages"][0]
+        self.assertFalse(result.ok)
+        self.assertEqual(payload["status"], "partial")
+        self.assertTrue(stage["control_flow"]["stopped_by_guard"])
+        self.assertEqual(stage["control_flow"]["iterations"], 1)
+
     def test_plan_subagents_approves_normalized_plan_without_running_llm(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
@@ -474,6 +581,26 @@ class SubAgentTests(unittest.TestCase):
 
         self.assertEqual(result.decision, Decision.DENY)
         self.assertTrue(result.dangerous)
+
+    def test_security_rejects_unknown_workflow_edge_node(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reviewer = ToolSecurityReviewer(Path(temp_dir))
+
+            result = reviewer.review(
+                "plan_subagent_workflow",
+                {
+                    "stages": [
+                        {
+                            "name": "bad_edge",
+                            "nodes": [{"name": "known", "task": "inspect", "path_scope": ["."]}],
+                            "edges": [{"from": "known", "to": "missing", "condition": "always"}],
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(result.decision, Decision.DENY)
+        self.assertTrue(result.invalid)
 
     def test_grep_files_searches_workspace_text(self):
         with tempfile.TemporaryDirectory() as temp_dir:

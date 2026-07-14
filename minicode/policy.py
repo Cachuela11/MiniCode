@@ -93,8 +93,26 @@ class PolicyEngine:
                                     "allowed_tools": ["list_files", "read_file", "grep_files"],
                                     "path_scope": ["relative/path/or/."],
                                     "max_steps": 4,
+                                },
+                                {
+                                    "name": "next_node",
+                                    "task": "bounded follow-up investigation only if the edge condition is met",
+                                    "context": "receives stage-local handoff from earlier node",
+                                    "allowed_tools": ["list_files", "read_file", "grep_files"],
+                                    "path_scope": ["relative/path/or/."],
+                                    "max_steps": 4,
                                 }
                             ],
+                            "entry_nodes": ["short_snake_case"],
+                            "edges": [
+                                {
+                                    "from": "short_snake_case",
+                                    "to": "next_node",
+                                    "condition": "on_success",
+                                    "max_traversals": 1,
+                                }
+                            ],
+                            "max_iterations": 4,
                         }
                     ],
                     "max_parallel_per_stage": 2,
@@ -105,8 +123,11 @@ class PolicyEngine:
             rules.extend(
                 [
                     "Call plan_subagent_workflow as the next action before finish or other investigative tools.",
-                    "You, the main agent, must fill in the DAG-style workflow yourself: split the goal into ordered stages.",
-                    "Nodes in the same stage should be independent and may run in parallel.",
+                    "You, the main agent, must split the goal into ordered stages; stages are serial and cannot jump backward.",
+                    "Inside one stage, you may use entry_nodes and edges to express bounded serial, parallel, branch, or retry flow among subagents.",
+                    "Any loop or retry edge must have max_traversals, and every controlled stage must have max_iterations.",
+                    "If the bounded stage workflow cannot resolve the issue, return partial findings and recommended next user decisions instead of expanding the loop.",
+                    "Nodes in the same stage with no dependency edge may run in parallel.",
                     "Later stages should depend only on limited handoff context from earlier stages.",
                     "Each node must include task, context, allowed_tools, path_scope, and max_steps.",
                     "After plan_subagent_workflow returns an approved workflow, call run_subagent_workflow with the approved stages.",

@@ -182,7 +182,7 @@ flowchart TD
 
 ## 中心化多 Agent 协作
 
-当前第一版采用 `subagent as tool`：主 Agent 不移交控制权，子 Agent 是 tool 内部的受控执行单元。复杂任务默认走 DAG workflow：主 Agent 先规划 stage / node，同一 stage 的节点可以并行，不同 stage 串行传递有限 handoff context。启动方式支持三种：`--subagents auto`、`--subagents on`、`--subagents off`。
+当前第一版采用 `subagent as tool`：主 Agent 不移交控制权，子 Agent 是 tool 内部的受控执行单元。复杂任务默认走 stage workflow：stage 之间严格串行且无回退；单个 stage 内可以用 `edges` 表达串行、并行、分支或有限循环的一组 subagent。启动方式支持三种：`--subagents auto`、`--subagents on`、`--subagents off`。
 
 这里的 `handoff_context` 指上一个 stage 交给下一个 stage 的精简上下文，只保留后续节点需要的结论、证据和下一步建议，不传递完整子 Agent 执行轨迹。
 
@@ -191,15 +191,17 @@ flowchart TD
 1. 用户 query 进入单任务 run 或 chat turn 后，先由 `TaskModeRouter` 判断本轮是否需要 subagent。
 2. `off` 直接走默认 agent；`on` 直接进入 subagent planning；`auto` 会先让 DeepSeek 做复杂度判断，只返回模式、原因和 planning hints。
 3. 如果进入 subagent 模式，`PolicyEngine` 会把本轮 required first action 设置成 `plan_subagent_workflow`。
-4. 主 Agent 必须先调用 `plan_subagent_workflow`，自己把任务拆成有序 `stages`；当前最多 4 个 stage，每个 stage 最多 3 个可并行 `nodes`。
+4. 主 Agent 必须先调用 `plan_subagent_workflow`，自己把任务拆成有序 `stages`；当前最多 4 个 stage，每个 stage 最多 3 个 `nodes`。
 5. 每个 node 都要包含 `task`、`context`、`allowed_tools`、`path_scope`、`max_steps`。`context` 是主 Agent 给该 node 的有限上下文。
-6. `plan_subagent_workflow` 只做校验和规范化，不执行子 Agent；它返回 `approved_stages` 和建议的下一步 `run_subagent_workflow` action。
-7. 主 Agent 再调用 `run_subagent_workflow`。每个 stage 内部并行启动多个只读子 Agent；stage 之间串行执行。
-8. 每个子 Agent node 启动时会创建一个独立临时 workspace snapshot，文件类工具只读取该 snapshot，不直接读取或写入本地项目 workspace。
-9. node 完成后，MiniCode 只保留压缩报告和 trace，临时 snapshot 会立即销毁。
-10. 每个 stage 完成后，MiniCode 会把该 stage 的结构化压缩报告合成有长度预算的 `handoff_context`，自动注入到下一 stage 的 node context 中。
-11. 子 Agent 完成后只把精简结构化报告回传给主 Agent；完整子步骤进入 run log 的 `subagent_trace`。
-12. 主 Agent 读取 workflow 最终报告后继续决定是否读文件、修改代码、运行测试或最终回答。
+6. stage 可以选择不写 `edges`，此时该 stage 内 node 按并行批次执行；也可以写 `entry_nodes`、`edges`、`max_iterations`，由受控图执行器推进。
+7. `plan_subagent_workflow` 只做校验和规范化，不执行子 Agent；它返回 `approved_stages` 和建议的下一步 `run_subagent_workflow` action。
+8. 主 Agent 再调用 `run_subagent_workflow`。每个 stage 内部按并行批次或受控 graph 执行只读子 Agent；stage 之间串行执行。
+9. 每个子 Agent node 启动时会创建一个独立临时 workspace snapshot，文件类工具只读取该 snapshot，不直接读取或写入本地项目 workspace。
+10. node 完成后，MiniCode 只保留压缩报告和 trace，临时 snapshot 会立即销毁。
+11. 每个 stage 完成后，MiniCode 会把该 stage 的结构化压缩报告合成有长度预算的 `handoff_context`，自动注入到下一 stage 的 node context 中。
+12. 子 Agent 完成后只把精简结构化报告回传给主 Agent；完整子步骤进入 run log 的 `subagent_trace`。
+13. 如果 stage 内部循环/分支触发预算保护，workflow 会返回 partial 结果、已发现证据和建议，让主 Agent 或用户决定下一步。
+14. 主 Agent 读取 workflow 最终报告后继续决定是否读文件、修改代码、运行测试或最终回答。
 
 ```mermaid
 flowchart TD
@@ -253,9 +255,12 @@ flowchart TD
 - `auto` 模式会在每个单任务 run 或 chat turn 开始前先做一次任务复杂度判断；简单任务走默认 agent，复杂任务把 `plan_subagent_workflow` 注入为本轮 required first action。
 - `on` 模式跳过复杂度判断，直接强制 subagent workflow planning；`off` 模式完全关闭自动 subagent 干预，但模型仍能看到 subagent tools。
 - 主 Agent 仍然负责规划、审批、文件修改、测试、最终回答和质量控制。
-- 主 Agent 必须先调用 `plan_subagent_workflow` 显式拆出 DAG workflow；该 tool 只校验和规范化计划，不执行子 Agent。
+- 主 Agent 必须先调用 `plan_subagent_workflow` 显式拆出 stage workflow；该 tool 只校验和规范化计划，不执行子 Agent。
 - `plan_subagent_workflow` 返回 approved workflow 后，主 Agent 下一步再调用 `run_subagent_workflow` 执行。
 - workflow 有硬限制：最多 4 个 stage，每个 stage 最多 3 个 node；`max_parallel_per_stage` 也不会超过 3。
+- stage 之间严格串行、无回退；stage 内部可以用 `edges` 做受控 workflow，但必须有入口、条件和预算。
+- stage 内部 `edges` 最多 6 条，`max_iterations` 最多 6，单条边 `max_traversals` 最多 2；超过预算时停止继续扩展，返回 partial 结果和建议。
+- 支持的第一版边条件包括 `always`、`on_success`、`on_failure`、`contains:文本`、`not_contains:文本`、`resolved`、`unresolved`；无法识别的模糊条件默认不自动触发，避免跑偏。
 - 子 Agent 默认只允许只读工具：`list_files`、`read_file`、`grep_files`、`search_skills`、`load_skill`、`search_memory`、`load_memory`。
 - 第一版禁止子 Agent 使用 `write_file`、`run_shell`、`run_tests`、`plan_subagents`、`run_subagents`、`plan_subagent_workflow`、`run_subagent_workflow`，避免写文件、shell 副作用和递归调度。
 - 每个 node 都有独立 `task`、`context`、`allowed_tools`、`path_scope` 和 `max_steps`，子 Agent 访问文件时必须落在自己的路径边界内。
@@ -377,7 +382,7 @@ flowchart TD
 当前实现位置：
 
 - `minicode/policy.py`：定义 `PolicyEngine`、`PolicyDecision`、`RequiredAction` 和 `render_policy_prompt()`。
-- `minicode/task_mode.py`：在 policy 之前做任务模式判断，`auto` 会调用 DeepSeek 判断复杂度，`on` 会强制进入 subagent workflow planning，但最终 DAG workflow 由主 Agent 通过 `plan_subagent_workflow` 生成。
+- `minicode/task_mode.py`：在 policy 之前做任务模式判断，`auto` 会调用 DeepSeek 判断复杂度，`on` 会强制进入 subagent workflow planning，但最终 stage workflow 由主 Agent 通过 `plan_subagent_workflow` 生成。
 - `minicode/prompts.py`：构造 task / turn message 时注入 policy 文本。
 - `minicode/runtime.py`：单任务运行开始时生成一次 policy，并写入 `run_log.policies`。
 - `minicode/session.py`：交互式每个 turn 都生成一次 policy，并发送 `policy` UI event。
@@ -389,7 +394,7 @@ flowchart TD
 - 工作区检查 / 分析类请求：要求先使用文件类 tools，不要只凭 memory 或 initial context 回答文件内容。
 - 代码修改类请求：要求聚焦本次修改；修改后如果有合适命令，应运行相关测试，或者说明为什么没跑。
 - 测试 / 调试类请求：优先使用 `run_tests`，只有 `run_tests` 不适合时才用 `run_shell`。
-- 复杂任务且 subagent 模式命中：强制下一步先调用 `plan_subagent_workflow`，由主 Agent 规划 DAG workflow；计划通过后再调用 `run_subagent_workflow`。
+- 复杂任务且 subagent 模式命中：强制下一步先调用 `plan_subagent_workflow`，由主 Agent 规划 stage workflow；计划通过后再调用 `run_subagent_workflow`。
 
 模型实际看到的是本轮 user message 中的一段 `Policy directives for this turn`。例如项目结构请求会注入：
 
@@ -579,7 +584,7 @@ MiniCode/
 - `minicode/resume.py`：历史对话恢复。负责定位 run log、读取 JSON，并把历史 session 压缩成可注入当前上下文的 resume context。
 - `minicode/llm.py`：DeepSeek API client。调用 OpenAI-compatible `/chat/completions`，返回模型内容、token 用量和耗时。
 - `minicode/tools.py`：Tool runtime。注册并执行当前支持的 tools，统一返回 `ToolResult`。
-- `minicode/subagents.py`：中心化多 Agent 协作运行器。实现 batch 型 `plan_subagents/run_subagents`，以及 DAG 型 `plan_subagent_workflow/run_subagent_workflow`；负责 stage 串行、node 并行、handoff context、只读工具约束、路径边界和压缩结果回传。
+- `minicode/subagents.py`：中心化多 Agent 协作运行器。实现 batch 型 `plan_subagents/run_subagents`，以及 stage workflow 型 `plan_subagent_workflow/run_subagent_workflow`；负责 stage 串行、stage 内受控 graph、handoff context、只读工具约束、路径边界和压缩结果回传。
 - `minicode/sandbox.py`：Docker sandbox。负责把命令放进 Docker 的 `/workspace` 中执行，并收集 stdout、stderr、exit code、耗时和权限信息。
 - `minicode/permissions.py`：命令权限策略。对危险命令做 `allow`、`ask`、`deny` 判断，并支持 `never`、`ask`、`always` 三种审批模式。
 - `minicode/security.py`：tool 执行前安全审查。负责工具风险元信息、参数自检、路径越界保护、敏感路径过滤和 secret-like 文件拦截。
@@ -1035,17 +1040,17 @@ flowchart TD
 
 - `plan_subagent_workflow`
   - 参数：`goal`、`stages`、`max_parallel_per_stage`
-  - 作用：由主 Agent 显式规划 DAG 型 subagent workflow。每个 stage 包含多个可并行 node，stage 之间串行传递有限 handoff context。
+  - 作用：由主 Agent 显式规划 stage workflow。stage 之间串行传递有限 handoff context；stage 内可通过 `edges` 表达串行、并行、分支或有限循环。
   - 执行位置：本地 runtime，不会启动子 Agent。
-  - 限制：最多 4 个 stage，每个 stage 最多 3 个 node。
+  - 限制：最多 4 个 stage，每个 stage 最多 3 个 node；stage 内最多 6 条 edge，`max_iterations` 最多 6。
   - 安全策略：校验每个 stage / node 的结构、禁用工具和路径边界。
   - 返回：`approved_stages` 和建议的下一步 `run_subagent_workflow` action。
 
 - `run_subagent_workflow`
   - 参数：`stages`、`max_parallel_per_stage`
-  - 作用：执行 approved DAG workflow。同一 stage 内 node 并行执行；每个 stage 完成后生成 `handoff_context` 并传给下一 stage。
+  - 作用：执行 approved stage workflow。stage 内没有 `edges` 时 node 并行执行；有 `edges` 时按受控 graph 推进；每个 stage 完成后生成 `handoff_context` 并传给下一 stage。
   - 执行位置：本地 runtime；每个 node 内部是受限只读子 Agent loop，并使用独立临时 workspace snapshot。
-  - 限制：最多 4 个 stage，每个 stage 最多 3 个 node；stage handoff 最多约 1500 字符。
+  - 限制：最多 4 个 stage，每个 stage 最多 3 个 node；循环/分支触发预算保护后返回 partial；stage handoff 最多约 1500 字符。
   - 安全策略：执行前再次检查 stage / node 结构、禁用工具和路径边界。
   - 日志：完整 workflow stage、node、step trace 写入 run log 的 `subagent_trace`。
 

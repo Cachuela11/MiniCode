@@ -15,7 +15,10 @@ from .sandbox import DockerSandbox, SandboxResult
 from .security import ToolSecurityReviewer
 from .skills import SkillCatalog
 from .subagents import (
+    MAX_EDGE_TRAVERSALS,
+    MAX_STAGE_EDGES,
     MAX_STAGE_NODES,
+    MAX_STAGE_WORKFLOW_ITERATIONS,
     MAX_WORKFLOW_STAGES,
     SubAgentRunner,
     SubAgentWorkflowRunner,
@@ -110,8 +113,8 @@ class ToolRegistry:
                 '- load_memory: {"memory_id": "memory-id", "max_chars": 4000}',
                 f'- plan_subagents: max {MAX_STAGE_NODES} tasks, {{"goal": "main goal", "tasks": [{{"name": "short_name", "task": "bounded investigation", "context": "why this subtask matters", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}}], "max_parallel": 2}}',
                 f'- run_subagents: max {MAX_STAGE_NODES} tasks, {{"tasks": [{{"name": "short_name", "task": "bounded investigation", "context": "approved planning context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}}]}}',
-                f'- plan_subagent_workflow: max {MAX_WORKFLOW_STAGES} stages and max {MAX_STAGE_NODES} nodes per stage, {{"goal": "main goal", "stages": [{{"name": "stage_name", "nodes": [{{"name": "node_name", "task": "bounded investigation", "context": "stage-local context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}}]}}], "max_parallel_per_stage": 2}}',
-                f'- run_subagent_workflow: max {MAX_WORKFLOW_STAGES} stages and max {MAX_STAGE_NODES} nodes per stage, {{"stages": [{{"name": "stage_name", "nodes": [{{"name": "node_name", "task": "bounded investigation", "context": "approved context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}}]}}], "max_parallel_per_stage": 2}}',
+                f'- plan_subagent_workflow: max {MAX_WORKFLOW_STAGES} serial stages, max {MAX_STAGE_NODES} nodes per stage, optional bounded stage edges, {{"goal": "main goal", "stages": [{{"name": "stage_name", "nodes": [{{"name": "node_a", "task": "bounded investigation", "context": "stage-local context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}}, {{"name": "node_b", "task": "bounded follow-up", "context": "uses stage-local handoff", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}}], "entry_nodes": ["node_a"], "edges": [{{"from": "node_a", "to": "node_b", "condition": "on_success", "max_traversals": 1}}], "max_iterations": 4}}], "max_parallel_per_stage": 2}}',
+                f'- run_subagent_workflow: max {MAX_WORKFLOW_STAGES} serial stages, max {MAX_STAGE_NODES} nodes per stage, stage edges max {MAX_STAGE_EDGES}, max_iterations {MAX_STAGE_WORKFLOW_ITERATIONS}, edge max_traversals {MAX_EDGE_TRAVERSALS}',
                 '- finish: {"answer": "concise final answer for the user"} inside args, e.g. {"action":"finish","args":{"answer":"..."}}',
             ]
         )
@@ -590,7 +593,7 @@ def _compact_preview(value: str, limit: int = 300) -> str:
 
 
 def _workflow_stage_to_dict(stage) -> dict[str, Any]:
-    return {
+    payload = {
         "name": stage.name,
         "nodes": [
             {
@@ -604,6 +607,19 @@ def _workflow_stage_to_dict(stage) -> dict[str, Any]:
             for node in stage.nodes
         ],
     }
+    if getattr(stage, "edges", None):
+        payload["entry_nodes"] = stage.entry_nodes
+        payload["edges"] = [
+            {
+                "from": edge.from_node,
+                "to": edge.to_node,
+                "condition": edge.condition,
+                "max_traversals": edge.max_traversals,
+            }
+            for edge in stage.edges
+        ]
+        payload["max_iterations"] = stage.max_iterations
+    return payload
 
 
 def _should_skip_file(path: Path, workspace: Path) -> bool:
