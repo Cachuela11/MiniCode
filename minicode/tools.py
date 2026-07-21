@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -66,14 +69,20 @@ class ToolRegistry:
         self.llm = llm
         self.model = model
         self.skill_recall_k = max(0, skill_recall_k)
+        self.todos: list[dict[str, str]] = []
         self.security = ToolSecurityReviewer(self.workspace)
         self._tools: dict[str, ToolHandler] = {
             "run_shell": self._run_shell,
             "list_files": self._list_files,
             "read_file": self._read_file,
+            "edit_file": self._edit_file,
             "write_file": self._write_file,
             "run_tests": self._run_tests,
+            "glob_files": self._glob_files,
             "grep_files": self._grep_files,
+            "todo_write": self._todo_write,
+            "web_fetch": self._web_fetch,
+            "inspect_diagnostics": self._inspect_diagnostics,
             "read_context_artifact": self._read_context_artifact,
             "search_skills": self._search_skills,
             "load_skill": self._load_skill,
@@ -103,9 +112,14 @@ class ToolRegistry:
                 '- run_shell: {"command": "shell command to run in /workspace"}',
                 '- list_files: {"path": ".", "max_depth": 2, "limit": 200}',
                 '- read_file: {"path": "relative/path", "start_line": 1, "limit": 200}',
+                '- edit_file: {"path": "relative/path", "old_text": "exact text", "new_text": "replacement", "replace_all": false}',
                 '- write_file: {"path": "relative/path", "content": "new file content", "overwrite": false}',
                 '- run_tests: {"command": "test command, default: python -m pytest"}',
+                '- glob_files: {"pattern": "**/*.py", "path": ".", "limit": 100}',
                 '- grep_files: {"pattern": "text or regex", "path": ".", "limit": 100, "case_sensitive": false}',
+                '- todo_write: {"todos": [{"id": "short_id", "content": "task", "status": "pending|in_progress|completed"}]}',
+                '- web_fetch: {"url": "https://example.com/docs", "max_chars": 6000}',
+                '- inspect_diagnostics: {"path": ".", "limit": 100}',
                 '- read_context_artifact: {"artifact_id": "obs-0001", "start_line": 1, "limit": 200}',
                 '- search_skills: {"query": "what you need help with", "limit": 5}',
                 '- load_skill: {"name": "skill_name", "max_chars": 4000}',
@@ -200,6 +214,36 @@ class ToolRegistry:
         output = "\n".join(numbered) or "File is empty or range has no lines."
         return ToolResult(True, output, stdout=output, exit_code=0)
 
+    def _edit_file(self, args: dict[str, Any]) -> ToolResult:
+        path = self._resolve_workspace_path(str(args.get("path", "")))
+        old_text = args.get("old_text")
+        new_text = args.get("new_text")
+        replace_all = bool(args.get("replace_all", False))
+        if not path.is_file():
+            message = f"ERROR: file not found: {path.relative_to(self.workspace).as_posix()}"
+            return ToolResult(False, message, stderr=message, exit_code=1)
+        if not isinstance(old_text, str) or not old_text:
+            message = "ERROR: edit_file requires non-empty string args.old_text."
+            return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
+        if not isinstance(new_text, str):
+            message = "ERROR: edit_file requires string args.new_text."
+            return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
+
+        content = path.read_text(encoding="utf-8", errors="replace")
+        count = content.count(old_text)
+        if count == 0:
+            message = "ERROR: old_text was not found."
+            return ToolResult(False, message, stderr=message, exit_code=1)
+        if count > 1 and not replace_all:
+            message = f"ERROR: old_text matched {count} times. Set replace_all=true or provide a more specific old_text."
+            return ToolResult(False, message, stderr=message, exit_code=1)
+        updated = content.replace(old_text, new_text, -1 if replace_all else 1)
+        path.write_text(updated, encoding="utf-8")
+        rel = path.relative_to(self.workspace).as_posix()
+        replacements = count if replace_all else 1
+        output = f"Edited {rel}: {replacements} replacement(s)."
+        return ToolResult(True, output, stdout=output, exit_code=0)
+
     def _write_file(self, args: dict[str, Any]) -> ToolResult:
         path = self._resolve_workspace_path(str(args.get("path", "")))
         content = args.get("content")
@@ -220,6 +264,27 @@ class ToolRegistry:
     def _run_tests(self, args: dict[str, Any]) -> ToolResult:
         command = str(args.get("command", "python -m pytest")).strip() or "python -m pytest"
         return _sandbox_result_to_tool_result(self.sandbox.run(command))
+
+    def _glob_files(self, args: dict[str, Any]) -> ToolResult:
+        pattern = str(args.get("pattern", "")).strip()
+        if not pattern:
+            message = "ERROR: glob_files requires args.pattern."
+            return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
+        root = self._resolve_workspace_path(str(args.get("path", ".")))
+        limit = _as_int(args.get("limit", 100), default=100, minimum=1, maximum=1000)
+        candidates = root.glob(pattern) if root.is_dir() else [root]
+        rows: list[str] = []
+        for path in sorted(candidates):
+            resolved = path.resolve()
+            if resolved != self.workspace and self.workspace not in resolved.parents:
+                continue
+            if not resolved.is_file() or _should_skip_file(resolved, self.workspace):
+                continue
+            rows.append(resolved.relative_to(self.workspace).as_posix())
+            if len(rows) >= limit:
+                break
+        output = "\n".join(rows) or "No files matched."
+        return ToolResult(True, output, stdout=output, exit_code=0)
 
     def _grep_files(self, args: dict[str, Any]) -> ToolResult:
         pattern = str(args.get("pattern", "")).strip()
@@ -254,6 +319,86 @@ class ToolRegistry:
                         return ToolResult(True, output, stdout=output, exit_code=0)
         output = "\n".join(rows) or "No matches found."
         return ToolResult(True, output, stdout=output, exit_code=0)
+
+    def _todo_write(self, args: dict[str, Any]) -> ToolResult:
+        raw_todos = args.get("todos")
+        if not isinstance(raw_todos, list):
+            message = "ERROR: todo_write requires args.todos list."
+            return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
+        todos: list[dict[str, str]] = []
+        for index, item in enumerate(raw_todos, start=1):
+            if not isinstance(item, dict):
+                message = f"ERROR: todo #{index} must be an object."
+                return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
+            todo_id = str(item.get("id") or f"todo_{index}").strip()
+            content = str(item.get("content") or "").strip()
+            status = str(item.get("status") or "pending").strip()
+            if not content:
+                message = f"ERROR: todo #{index} requires content."
+                return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
+            if status not in {"pending", "in_progress", "completed"}:
+                message = f"ERROR: todo #{index} status must be pending, in_progress, or completed."
+                return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
+            todos.append({"id": todo_id, "content": content, "status": status})
+        self.todos = todos
+        output = json.dumps({"todos": todos}, indent=2, ensure_ascii=False)
+        return ToolResult(True, output, stdout=output, exit_code=0)
+
+    def _web_fetch(self, args: dict[str, Any]) -> ToolResult:
+        url = str(args.get("url", "")).strip()
+        max_chars = _as_int(args.get("max_chars", 6000), default=6000, minimum=200, maximum=20000)
+        request = urllib.request.Request(url, headers={"User-Agent": "MiniCode/0.1"})
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                raw = response.read(max_chars + 1)
+                charset = response.headers.get_content_charset() or "utf-8"
+                body = raw.decode(charset, errors="replace")
+                truncated = len(raw) > max_chars
+                payload = {
+                    "url": url,
+                    "status": getattr(response, "status", None),
+                    "content_type": response.headers.get("content-type", ""),
+                    "truncated": truncated,
+                    "body": body[:max_chars],
+                }
+                output = json.dumps(payload, indent=2, ensure_ascii=False)
+                return ToolResult(True, output, stdout=output, exit_code=0)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            message = f"ERROR: web_fetch failed: {exc}"
+            return ToolResult(False, message, stderr=message, exit_code=1)
+
+    def _inspect_diagnostics(self, args: dict[str, Any]) -> ToolResult:
+        root = self._resolve_workspace_path(str(args.get("path", ".")))
+        limit = _as_int(args.get("limit", 100), default=100, minimum=1, maximum=1000)
+        files = [root] if root.is_file() else sorted(root.rglob("*.py"))
+        diagnostics: list[dict[str, Any]] = []
+        checked = 0
+        for path in files:
+            if _should_skip_file(path, self.workspace):
+                continue
+            checked += 1
+            rel = path.relative_to(self.workspace).as_posix()
+            try:
+                source = path.read_text(encoding="utf-8", errors="replace")
+                compile(source, str(path), "exec")
+            except SyntaxError as exc:
+                diagnostics.append(
+                    {
+                        "path": rel,
+                        "line": exc.lineno,
+                        "column": exc.offset,
+                        "message": exc.msg,
+                    }
+                )
+                if len(diagnostics) >= limit:
+                    break
+        payload = {
+            "checked_files": checked,
+            "diagnostic_count": len(diagnostics),
+            "diagnostics": diagnostics,
+        }
+        output = json.dumps(payload, indent=2, ensure_ascii=False)
+        return ToolResult(True, output, stdout=output, exit_code=0 if not diagnostics else 1)
 
     def _read_context_artifact(self, args: dict[str, Any]) -> ToolResult:
         if self.context_manager is None:

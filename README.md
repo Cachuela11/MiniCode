@@ -261,7 +261,7 @@ flowchart TD
 - stage 之间严格串行、无回退；stage 内部可以用 `edges` 做受控 workflow，但必须有入口、条件和预算。
 - stage 内部 `edges` 最多 6 条，`max_iterations` 最多 6，单条边 `max_traversals` 最多 2；超过预算时停止继续扩展，返回 partial 结果和建议。
 - 支持的第一版边条件包括 `always`、`on_success`、`on_failure`、`contains:文本`、`not_contains:文本`、`resolved`、`unresolved`；无法识别的模糊条件默认不自动触发，避免跑偏。
-- 子 Agent 默认只允许只读工具：`list_files`、`read_file`、`grep_files`、`search_skills`、`load_skill`、`search_memory`、`load_memory`。
+- 子 Agent 默认只允许只读工具：`list_files`、`read_file`、`glob_files`、`grep_files`、`inspect_diagnostics`、`search_skills`、`load_skill`、`search_memory`、`load_memory`。
 - 第一版禁止子 Agent 使用 `write_file`、`run_shell`、`run_tests`、`plan_subagents`、`run_subagents`、`plan_subagent_workflow`、`run_subagent_workflow`，避免写文件、shell 副作用和递归调度。
 - 每个 node 都有独立 `task`、`context`、`allowed_tools`、`path_scope` 和 `max_steps`，子 Agent 访问文件时必须落在自己的路径边界内。
 - 每个 node 运行在独立临时 workspace snapshot 中，默认跳过 `.git`、`.minicode`、缓存目录、虚拟环境、`node_modules` 和 secret-like 文件；node 结束后销毁 snapshot。
@@ -458,7 +458,7 @@ CommandPolicy              = 检查“这个 shell 命令能不能被执行”
 PromptInjectionClassifier = 检查“这个 tool 输出能不能安全进入上下文”
 ```
 
-因此，`read_file`、`write_file`、`search_memory` 这类结构化 tool 只需要工具自检；`run_shell` 和 `run_tests` 因为包含自由 shell 字符串，所以还需要规则过滤和人工确认。
+因此，`read_file`、`edit_file`、`write_file`、`glob_files`、`search_memory` 这类结构化 tool 只需要工具自检；`run_shell` 和 `run_tests` 因为包含自由 shell 字符串，所以还需要规则过滤和人工确认。
 
 AI 风险分类机制：
 
@@ -975,6 +975,12 @@ flowchart TD
   - 执行位置：本地 host workspace。
   - 安全策略：会校验路径不能逃出 workspace。
 
+- `edit_file`
+  - 参数：`path`、`old_text`、`new_text`、`replace_all`
+  - 作用：对文件做精确文本替换。默认要求 `old_text` 只命中一次，避免误改。
+  - 执行位置：本地 host workspace。
+  - 安全策略：会校验路径不能逃出 workspace，不能编辑 `.git` 或 secret-like 文件。
+
 - `write_file`
   - 参数：`path`、`content`、`overwrite`
   - 作用：写入文件。默认不覆盖已有文件，除非 `overwrite=true`。
@@ -988,11 +994,35 @@ flowchart TD
   - 执行位置：Docker `/workspace`。
   - 安全策略：先经过 `CommandPolicy`，再决定是否执行。
 
+- `glob_files`
+  - 参数：`pattern`、`path`、`limit`
+  - 作用：按 glob 模式查找文件，例如 `**/*.py`。
+  - 执行位置：本地 host workspace。
+  - 安全策略：会校验根路径不能逃出 workspace，并跳过 `.git`、`.minicode`、缓存目录和过大文件。
+
 - `grep_files`
   - 参数：`pattern`、`path`、`limit`、`case_sensitive`
   - 作用：在 workspace 指定路径下搜索文本匹配，返回 `path:line: content`。
   - 执行位置：本地 host workspace。
   - 安全策略：会校验路径不能逃出 workspace，默认跳过 `.git`、`.minicode`、缓存目录和过大文件。
+
+- `todo_write`
+  - 参数：`todos`
+  - 作用：让模型显式维护当前任务计划，状态为 `pending`、`in_progress` 或 `completed`。
+  - 执行位置：本地 runtime 内存状态。
+  - 安全策略：校验 todo 结构、数量和状态枚举。
+
+- `web_fetch`
+  - 参数：`url`、`max_chars`
+  - 作用：抓取指定网页内容，作为 observation 返回。
+  - 执行位置：本地 runtime 网络请求。
+  - 安全策略：只允许 `http` / `https`，阻止 localhost 和 private IP。
+
+- `inspect_diagnostics`
+  - 参数：`path`、`limit`
+  - 作用：第一版诊断工具，扫描 Python 文件语法错误并返回结构化 diagnostics。
+  - 执行位置：本地 host workspace；子 Agent 中则运行在临时 workspace snapshot。
+  - 安全策略：会校验路径不能逃出 workspace，并跳过 `.git`、`.minicode`、缓存目录和过大文件。
 
 - `read_context_artifact`
   - 参数：`artifact_id`、`start_line`、`limit`

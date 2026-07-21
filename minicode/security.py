@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import ipaddress
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -42,10 +44,15 @@ class ToolSecurityReviewer:
         self.risks = {
             "list_files": ToolRisk("list_files", "file_read", risk="low"),
             "read_file": ToolRisk("read_file", "file_read", risk="medium"),
+            "edit_file": ToolRisk("edit_file", "file_edit", mutates_workspace=True, risk="high"),
             "write_file": ToolRisk("write_file", "file_write", mutates_workspace=True, risk="high"),
             "run_shell": ToolRisk("run_shell", "shell", sandboxed=True, risk="high"),
             "run_tests": ToolRisk("run_tests", "test", sandboxed=True, risk="medium"),
+            "glob_files": ToolRisk("glob_files", "file_read", risk="low"),
             "grep_files": ToolRisk("grep_files", "file_read", risk="medium"),
+            "todo_write": ToolRisk("todo_write", "planning", risk="low"),
+            "web_fetch": ToolRisk("web_fetch", "network", risk="medium"),
+            "inspect_diagnostics": ToolRisk("inspect_diagnostics", "diagnostics", risk="medium"),
             "read_context_artifact": ToolRisk("read_context_artifact", "context_read", risk="low"),
             "search_skills": ToolRisk("search_skills", "retrieval", risk="low"),
             "load_skill": ToolRisk("load_skill", "retrieval", risk="low"),
@@ -73,10 +80,20 @@ class ToolSecurityReviewer:
                 require_file_path=True,
                 deny_secret=True,
             )
+        if tool_name == "edit_file":
+            return self._review_edit_file(tool_name, risk, args)
         if tool_name == "write_file":
             return self._review_write_file(tool_name, risk, args)
         if tool_name in {"run_shell", "run_tests"}:
             return self._review_command(tool_name, risk, args)
+        if tool_name == "glob_files":
+            path_review = self._review_workspace_path(tool_name, risk, args, path_key="path", default_path=".")
+            if path_review.decision != Decision.ALLOW:
+                return path_review
+            pattern = args.get("pattern")
+            if not isinstance(pattern, str) or not pattern.strip():
+                return self._deny(tool_name, risk, "glob_files requires non-empty string args.pattern", invalid=True)
+            return self._allow(tool_name, risk, "security review passed")
         if tool_name == "grep_files":
             path_review = self._review_workspace_path(tool_name, risk, args, path_key="path", default_path=".")
             if path_review.decision != Decision.ALLOW:
@@ -85,6 +102,12 @@ class ToolSecurityReviewer:
             if not isinstance(pattern, str) or not pattern.strip():
                 return self._deny(tool_name, risk, "grep_files requires non-empty string args.pattern", invalid=True)
             return self._allow(tool_name, risk, "security review passed")
+        if tool_name == "todo_write":
+            return self._review_todo_write(tool_name, risk, args)
+        if tool_name == "web_fetch":
+            return self._review_web_fetch(tool_name, risk, args)
+        if tool_name == "inspect_diagnostics":
+            return self._review_workspace_path(tool_name, risk, args, path_key="path", default_path=".")
         if tool_name == "read_context_artifact":
             return self._review_context_artifact(tool_name, risk, args)
         if tool_name in {"search_skills", "search_memory"}:
@@ -95,6 +118,25 @@ class ToolSecurityReviewer:
             return self._review_subagents(tool_name, risk, args)
         if tool_name in {"plan_subagent_workflow", "run_subagent_workflow"}:
             return self._review_subagent_workflow(tool_name, risk, args)
+        return self._allow(tool_name, risk, "security review passed")
+
+    def _review_edit_file(self, tool_name: str, risk: ToolRisk, args: dict[str, Any]) -> SecurityReviewResult:
+        path_review = self._review_workspace_path(
+            tool_name,
+            risk,
+            args,
+            path_key="path",
+            require_file_path=True,
+            deny_secret=True,
+        )
+        if path_review.decision != Decision.ALLOW:
+            return path_review
+        if not isinstance(args.get("old_text"), str) or not args.get("old_text"):
+            return self._deny(tool_name, risk, "edit_file requires non-empty string args.old_text", invalid=True)
+        if not isinstance(args.get("new_text"), str):
+            return self._deny(tool_name, risk, "edit_file requires string args.new_text", invalid=True)
+        if "replace_all" in args and not isinstance(args.get("replace_all"), bool):
+            return self._deny(tool_name, risk, "edit_file args.replace_all must be boolean", invalid=True)
         return self._allow(tool_name, risk, "security review passed")
 
     def _review_workspace_path(
@@ -266,6 +308,42 @@ class ToolSecurityReviewer:
             return self._deny(tool_name, risk, "read_context_artifact requires a valid artifact_id", invalid=True)
         return self._allow(tool_name, risk, "security review passed")
 
+    def _review_todo_write(self, tool_name: str, risk: ToolRisk, args: dict[str, Any]) -> SecurityReviewResult:
+        todos = args.get("todos")
+        if not isinstance(todos, list):
+            return self._deny(tool_name, risk, "todo_write requires args.todos list", invalid=True)
+        if len(todos) > 20:
+            return self._deny(tool_name, risk, "todo_write supports at most 20 todos", invalid=True)
+        for index, todo in enumerate(todos, start=1):
+            if not isinstance(todo, dict):
+                return self._deny(tool_name, risk, f"todo #{index} must be an object", invalid=True)
+            if not isinstance(todo.get("content"), str) or not todo.get("content", "").strip():
+                return self._deny(tool_name, risk, f"todo #{index} requires non-empty content", invalid=True)
+            if todo.get("status", "pending") not in {"pending", "in_progress", "completed"}:
+                return self._deny(tool_name, risk, f"todo #{index} has invalid status", invalid=True)
+        return self._allow(tool_name, risk, "security review passed")
+
+    def _review_web_fetch(self, tool_name: str, risk: ToolRisk, args: dict[str, Any]) -> SecurityReviewResult:
+        url = args.get("url")
+        if not isinstance(url, str) or not url.strip():
+            return self._deny(tool_name, risk, "web_fetch requires non-empty string args.url", invalid=True)
+        parsed = urllib_parse(url)
+        if parsed is None:
+            return self._deny(tool_name, risk, "web_fetch requires a valid URL", invalid=True)
+        if parsed.scheme not in {"http", "https"}:
+            return self._deny(tool_name, risk, "web_fetch allows only http or https URLs", dangerous=True, invalid=True)
+        host = (parsed.hostname or "").lower()
+        if _is_blocked_fetch_host(host):
+            return self._deny(tool_name, risk, f"web_fetch blocks local or private host: {host}", dangerous=True)
+        if "max_chars" in args:
+            try:
+                max_chars = int(args["max_chars"])
+            except (TypeError, ValueError):
+                return self._deny(tool_name, risk, "web_fetch args.max_chars must be an integer", invalid=True)
+            if max_chars < 200 or max_chars > 20000:
+                return self._deny(tool_name, risk, "web_fetch args.max_chars must be 200-20000", invalid=True)
+        return self._allow(tool_name, risk, "security review passed")
+
     def _review_query_tool(self, tool_name: str, risk: ToolRisk, args: dict[str, Any]) -> SecurityReviewResult:
         query = args.get("query")
         if not isinstance(query, str) or not query.strip():
@@ -378,6 +456,28 @@ def _reads_secret_in_shell(command: str) -> bool:
             re.compile(r"\.(pem|key|p12|pfx)\b"),
         ]
     )
+
+
+def urllib_parse(url: str) -> urllib.parse.ParseResult | None:
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return None
+    if not parsed.scheme or not parsed.netloc or not parsed.hostname:
+        return None
+    return parsed
+
+
+def _is_blocked_fetch_host(host: str) -> bool:
+    if not host:
+        return True
+    if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved
 
 
 def _security_slugify(value: str) -> str:

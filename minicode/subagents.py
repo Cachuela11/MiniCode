@@ -18,7 +18,9 @@ from .observability import Timer, TokenUsage, summarize_messages
 READ_ONLY_SUBAGENT_TOOLS = {
     "list_files",
     "read_file",
+    "glob_files",
     "grep_files",
+    "inspect_diagnostics",
     "search_skills",
     "load_skill",
     "search_memory",
@@ -587,7 +589,9 @@ class ScopedToolExecutor:
         descriptions = {
             "list_files": '- list_files: {"path": "scoped/path", "max_depth": 2, "limit": 100}',
             "read_file": '- read_file: {"path": "scoped/path.py", "start_line": 1, "limit": 120}',
+            "glob_files": '- glob_files: {"pattern": "**/*.py", "path": "scoped/path", "limit": 100}',
             "grep_files": '- grep_files: {"pattern": "text or regex", "path": "scoped/path", "limit": 100, "case_sensitive": false}',
+            "inspect_diagnostics": '- inspect_diagnostics: {"path": "scoped/path", "limit": 100}',
             "search_skills": '- search_skills: {"query": "what workflow you need", "limit": 3}',
             "load_skill": '- load_skill: {"name": "skill_name", "max_chars": 3000}',
             "search_memory": '- search_memory: {"query": "project fact or lesson", "limit": 3}',
@@ -602,7 +606,7 @@ class ScopedToolExecutor:
             )
         if name in FORBIDDEN_SUBAGENT_TOOLS:
             return _blocked_tool_result(f"ERROR: subagent tool {name!r} is forbidden in this version.")
-        if name in {"list_files", "read_file", "grep_files"}:
+        if name in {"list_files", "read_file", "glob_files", "grep_files", "inspect_diagnostics"}:
             raw_path = str(args.get("path", ".")).strip() or "."
             if not self._path_allowed(raw_path):
                 return _blocked_tool_result(
@@ -612,8 +616,12 @@ class ScopedToolExecutor:
                 return self._list_files(args)
             if name == "read_file":
                 return self._read_file(args)
+            if name == "glob_files":
+                return self._glob_files(args)
             if name == "grep_files":
                 return self._grep_files(args)
+            if name == "inspect_diagnostics":
+                return self._inspect_diagnostics(args)
         return self.parent.execute(name, args)
 
     def _path_allowed(self, raw_path: str) -> bool:
@@ -662,6 +670,25 @@ class ScopedToolExecutor:
         output = "\n".join(f"{index}: {line}" for index, line in enumerate(selected, start=start_line))
         return _tool_result(True, output or "File is empty or range has no lines.", exit_code=0)
 
+    def _glob_files(self, args: dict[str, Any]):
+        pattern = str(args.get("pattern", "")).strip()
+        if not pattern:
+            return _tool_result(False, "ERROR: glob_files requires args.pattern.", exit_code=2, invalid=True)
+        root = self._resolve_path(str(args.get("path", ".")))
+        limit = _as_int(args.get("limit", 100), default=100, minimum=1, maximum=1000)
+        candidates = root.glob(pattern) if root.is_dir() else [root]
+        rows: list[str] = []
+        for path in sorted(candidates):
+            resolved = path.resolve()
+            if resolved != self.workspace and self.workspace not in resolved.parents:
+                continue
+            if not resolved.is_file() or _should_skip_snapshot_file(resolved, self.workspace):
+                continue
+            rows.append(resolved.relative_to(self.workspace).as_posix())
+            if len(rows) >= limit:
+                break
+        return _tool_result(True, "\n".join(rows) or "No files matched.", exit_code=0)
+
     def _grep_files(self, args: dict[str, Any]):
         pattern = str(args.get("pattern", "")).strip()
         if not pattern:
@@ -690,6 +717,42 @@ class ScopedToolExecutor:
                     if len(rows) >= limit:
                         return _tool_result(True, "\n".join(rows), exit_code=0)
         return _tool_result(True, "\n".join(rows) or "No matches found.", exit_code=0)
+
+    def _inspect_diagnostics(self, args: dict[str, Any]):
+        root = self._resolve_path(str(args.get("path", ".")))
+        limit = _as_int(args.get("limit", 100), default=100, minimum=1, maximum=1000)
+        files = [root] if root.is_file() else sorted(root.rglob("*.py"))
+        diagnostics: list[dict[str, Any]] = []
+        checked = 0
+        for path in files:
+            if _should_skip_snapshot_file(path, self.workspace):
+                continue
+            checked += 1
+            rel = path.relative_to(self.workspace).as_posix()
+            try:
+                source = path.read_text(encoding="utf-8", errors="replace")
+                compile(source, str(path), "exec")
+            except SyntaxError as exc:
+                diagnostics.append(
+                    {
+                        "path": rel,
+                        "line": exc.lineno,
+                        "column": exc.offset,
+                        "message": exc.msg,
+                    }
+                )
+                if len(diagnostics) >= limit:
+                    break
+        output = json.dumps(
+            {
+                "checked_files": checked,
+                "diagnostic_count": len(diagnostics),
+                "diagnostics": diagnostics,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        return _tool_result(True, output, exit_code=0 if not diagnostics else 1)
 
     def _resolve_path(self, raw_path: str) -> Path:
         if not raw_path:
