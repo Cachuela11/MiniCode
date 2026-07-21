@@ -1,5 +1,5 @@
 from .catalog import SkillCatalog
-from .prompt import render_skill_prompt
+from .prompt import render_skill_catalog_prompt, render_skill_prompt, render_skill_route_prompt
 from .schema import RecalledSkill, SelectedSkill, Skill, SkillRoute
 
 __all__ = [
@@ -13,7 +13,9 @@ __all__ = [
     "RuleBasedSkillRanker",
     "RuleBasedSkillRouter",
     "TwoStageSkillRouter",
+    "render_skill_catalog_prompt",
     "render_skill_prompt",
+    "render_skill_route_prompt",
 ]
 
 

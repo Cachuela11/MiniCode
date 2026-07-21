@@ -24,10 +24,10 @@ Return exactly one JSON object and no Markdown fences.
 Every response must include "action" and "args". For final answers, put the
 answer inside args.answer, not at the top level.
 
-Available actions:
+Common actions:
 {tool_descriptions}
 
-Relevant skills:
+Skill catalog and routing:
 {skill_instructions}
 
 {context_layer_instructions}
@@ -72,7 +72,7 @@ def build_turn_message(
             "",
             render_policy_prompt(policy),
             "",
-            "Relevant skills for this turn:",
+            "Skill route hint for this turn:",
             skill_prompt,
         ]
     )

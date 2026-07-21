@@ -613,28 +613,29 @@ Skill 是给模型看的工作手册，不是可执行函数。Tool 负责真正
 
 ```mermaid
 flowchart TD
-    A[User task] --> B[L0 system prompt<br/>always includes full tool list]
-    B --> C[Load .skills/*.md metadata]
+    A[User task] --> B[L0 system prompt<br/>common tools + search_tools]
+    B --> C[Load .skills/*.md summaries]
     C --> D[Stage 1: metadata recall topK<br/>triggers +5<br/>intents +3<br/>tags +2<br/>name +1<br/>description +1]
     D --> E[Stage 2: DeepSeek rerank topN]
-    E --> F{Selected skills?}
-    F -->|yes| G[Inject selected skill docs]
-    F -->|no| H[No skill docs injected]
-    G --> I[Build agent prompt]
-    H --> I
+    E --> F[Inject skill catalog summaries<br/>mark selected_hint only]
+    F --> G{Model needs full workflow?}
+    G -->|yes| H[load_skill<br/>full skill + recommended tool schemas]
+    G -->|no skill match| I[Use common tools<br/>or search_tools]
     E --> J[Record skill_route in run log]
-    I --> K[Start agent loop]
+    H --> K[Start agent loop]
+    I --> K
 ```
 
 当前 skill 检索是“底层统一，入口分开”：
 
 - 底层统一在 `SkillToolRetriever`：先用 `MetadataSkillRetriever` 做元信息粗召回，再用 `LlmSkillRanker` 调 DeepSeek 精排；如果 LLM 精排失败，回退到本地规则精排。
-- 自动 route 入口：`TwoStageSkillRouter.route(task)` 调用 `SkillToolRetriever.retrieve(task, limit=max_skills)`，把 `selected` 转成 `SkillRoute`，再由 `render_skill_prompt()` 注入当前 task / chat turn。
+- 自动 route 入口：`TwoStageSkillRouter.route(task)` 调用 `SkillToolRetriever.retrieve(task, limit=max_skills)`，把 `selected` 转成 `SkillRoute`。当前不会自动注入完整 skill body，只会在 skill catalog 摘要中标记 `selected_hint`，并提示模型需要完整 workflow 时调用 `load_skill`。
 - Tool 入口：模型在 agent loop 内调用 `search_skills` 时，也调用同一个 `SkillToolRetriever.retrieve(query, limit)`，但返回形式是 tool observation，并写入 step log 的 `retrieval_trace`。
 - 两个入口的检索结果结构一致：`recalled`、`selected`、`rejected`、`intent`、`reranker`、`rerank_token_usage`、`rerank_error`、`retrieval_trace`。
-- 两个入口的区别只在消费方式：自动 route 把 selected skills 变成 prompt；`search_skills` 把 selected skills 变成 observation，后续可用 `load_skill` 加载完整 workflow。
+- 两个入口的区别只在消费方式：自动 route 把 selected skills 变成 route hint；`search_skills` 把 selected skills 变成 observation，后续可用 `load_skill` 加载完整 workflow。
 - 默认自动 route 最多注入 `2` 个 skill，可用 `--max-skills` 调整；默认粗召回 `8` 个候选，可用 `--skill-recall-k` 调整。
-- 完整 tool list 不属于 skill route，它常驻在 L0 system prompt；没有命中 skill 时，只是不额外注入 skill 文档，模型仍然能调用全部 tools。
+- 完整 tool list 不再常驻在 L0 system prompt。L0 只展示 common tools、`search_tools`、skill catalog 摘要和 route hint；没有命中 skill 时，模型直接使用 common tools，或者调用 `search_tools` 获取扩展 tool schema。
+- `load_skill` 会返回完整 skill workflow，并自动附带该 skill `tools` 字段声明的 recommended tool schemas，避免 skill 推荐的工具不在常驻 tool list 中时模型不知道参数格式。
 - run log 会记录 `skill_route.recalled`、`skill_route.selected`、`skill_route.retrieval_trace`、`reranker` 和精排 token 用量，方便后续 eval 对比 skill 是否有效。
 
 **Skill 自进化**
@@ -710,8 +711,8 @@ flowchart TD
 入口说明：
 
 - 自动 route：发生在单任务运行开始前，或 `--chat` 每个用户 turn 开始前。它不暴露给模型，属于系统主动为当前任务挑选少量 skill。
-- `search_skills` tool：发生在 agent loop 内。模型已经知道完整 tool list，因此可以主动搜索 skill；搜索结果仍然来自同一个 `SkillToolRetriever`。
-- `load_skill` tool：不参与检索排序，只负责按名称读取某个 skill 的正文，并作为 observation 加入后续上下文。
+- `search_skills` tool：发生在 agent loop 内。模型默认知道该 common tool，因此可以主动搜索 skill；搜索结果仍然来自同一个 `SkillToolRetriever`。
+- `load_skill` tool：不参与检索排序，只负责按名称读取某个 skill 的正文，并把完整 workflow 和 recommended tool schemas 作为 observation 加入后续上下文。
 
 Memory 检索召回与精排流程：
 
@@ -771,7 +772,7 @@ Agent loop 中的 context 工作流程：
 
 ```mermaid
 flowchart TD
-    A[User task] --> B[Build L0 system prompt<br/>full tool list always included]
+    A[User task] --> B[Build L0 system prompt<br/>common tools + search_tools]
     B --> C[Route selected skills]
     C --> D[Build first messages<br/>L0 + L1 + selected L2]
     D --> E[Before model call:<br/>compact messages if over budget]
@@ -792,7 +793,7 @@ L0-L3 分层架构：
 
 ```mermaid
 flowchart TB
-    L0["L0 Runtime Contract<br/>system role · JSON action protocol · full tool list · context policy"]
+    L0["L0 Runtime Contract<br/>system role · JSON action protocol · common tools + search_tools · skill catalog summaries · context policy"]
     L1["L1 Workspace File Index<br/>Docker pwd · bounded file paths · no file content"]
     L2["L2 Selected Skills<br/>two-stage router result · selected skill docs · per task / per chat turn"]
     L3["L3 Dynamic Working Memory<br/>action JSON · observation · inline small output · artifact placeholder · structured notes"]
@@ -807,7 +808,7 @@ flowchart TB
 
 层级说明：
 
-- `L0 runtime contract`：固定系统规则、JSON action 协议、完整 tool list 和 context 使用策略。它在 system prompt 中常驻，每次模型调用都会带上。
+- `L0 runtime contract`：固定系统规则、JSON action 协议、common tools、`search_tools`、skill catalog 摘要和 context 使用策略。它在 system prompt 中常驻，每次模型调用都会带上；扩展 tool schema 通过 `search_tools` 或 `load_skill` 按需进入上下文。
 - `L1 workspace file index`：运行开始时在 Docker `/workspace` 里读取当前工作目录和最多 200 个文件路径，不包含文件内容。
 - `L2 selected skills`：通过两阶段 skill router 选择少量 skill 注入 prompt。单任务模式在运行开始前选择；`--chat` 模式每个用户 turn 开始前重新选择。
 - `L3 dynamic working memory`：agent loop 中持续更新的动态上下文，只包含完整 action JSON 和 observation。`read_file`、`run_tests`、`load_skill`、`load_memory`、`read_context_artifact` 等 tool 的返回内容都只是 observation 的不同来源。
@@ -961,6 +962,14 @@ flowchart TD
 {"thought":"done","action":"finish","args":{"answer":"summary for the user"}}
 ```
 
+当前 tools 分为 common tools 和 extended tools：common tool schema 常驻 system prompt；extended tool 仍然注册可执行，但默认靠 `search_tools` 返回 schema 后再调用。
+
+- `search_tools`
+  - 参数：`query`、`limit`
+  - 作用：搜索扩展 tool，并返回匹配 tool 的名称、说明、参数 schema、类别和风险等级。
+  - 执行位置：本地 tool catalog。
+  - 使用方式：没有合适 skill、或当前上下文没有目标 tool schema 时先调用它。
+
 当前 tools：
 
 - `list_files`
@@ -1038,7 +1047,7 @@ flowchart TD
 
 - `load_skill`
   - 参数：`name`、`max_chars`
-  - 作用：把指定 skill 的完整说明作为 observation 注入后续上下文。
+  - 作用：把指定 skill 的完整说明作为 observation 注入后续上下文，并附带该 skill 推荐 tools 的 schema。
   - 执行位置：本地 skill catalog。
 
 - `search_memory`

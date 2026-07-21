@@ -14,7 +14,7 @@ from .observability import FileSnapshot, RunLog, StepLog, Timer, TokenUsage, mak
 from .policy import PolicyEngine
 from .prompts import SYSTEM_PROMPT_TEMPLATE, build_turn_message
 from .resume import ResumeResult
-from .skills import SkillRoute, render_skill_prompt
+from .skills import SkillRoute, render_skill_catalog_prompt, render_skill_route_prompt
 from .task_mode import TaskModeRouter
 
 if TYPE_CHECKING:
@@ -70,7 +70,10 @@ class CodingSession:
                 "role": "system",
                 "content": SYSTEM_PROMPT_TEMPLATE.format(
                     tool_descriptions=agent.tools.describe(),
-                    skill_instructions=render_skill_prompt(SkillRoute(intent="interactive_session")),
+                    skill_instructions=render_skill_catalog_prompt(
+                        agent.skill_catalog,
+                        SkillRoute(intent="interactive_session"),
+                    ),
                     context_layer_instructions=render_context_layer_prompt(),
                 ),
             },
@@ -185,7 +188,7 @@ class CodingSession:
                 "content": build_turn_message(
                     turn=turn,
                     user_message=user_message,
-                    skill_prompt=render_skill_prompt(skill_route),
+                    skill_prompt=render_skill_route_prompt(skill_route),
                     policy=policy,
                 ),
             }

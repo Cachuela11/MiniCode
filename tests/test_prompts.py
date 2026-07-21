@@ -28,8 +28,8 @@ class PromptBuilderTests(unittest.TestCase):
 
         self.assertIn("User turn 3:\ninspect workspace structure", message)
         self.assertIn("Policy directives for this turn", message)
-        self.assertIn("Relevant skills for this turn:\nNo relevant skills.", message)
-        self.assertLess(message.index("Policy directives"), message.index("Relevant skills"))
+        self.assertIn("Skill route hint for this turn:\nNo relevant skills.", message)
+        self.assertLess(message.index("Policy directives"), message.index("Skill route hint"))
 
 
 if __name__ == "__main__":

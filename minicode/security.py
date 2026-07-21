@@ -62,6 +62,7 @@ class ToolSecurityReviewer:
             "run_subagents": ToolRisk("run_subagents", "subagent", risk="medium"),
             "plan_subagent_workflow": ToolRisk("plan_subagent_workflow", "subagent_workflow_plan", risk="medium"),
             "run_subagent_workflow": ToolRisk("run_subagent_workflow", "subagent_workflow", risk="medium"),
+            "search_tools": ToolRisk("search_tools", "tool_discovery", risk="low"),
         }
 
     def review(self, tool_name: str, args: Any) -> SecurityReviewResult:
@@ -110,7 +111,7 @@ class ToolSecurityReviewer:
             return self._review_workspace_path(tool_name, risk, args, path_key="path", default_path=".")
         if tool_name == "read_context_artifact":
             return self._review_context_artifact(tool_name, risk, args)
-        if tool_name in {"search_skills", "search_memory"}:
+        if tool_name in {"search_tools", "search_skills", "search_memory"}:
             return self._review_query_tool(tool_name, risk, args)
         if tool_name in {"load_skill", "load_memory"}:
             return self._review_load_tool(tool_name, risk, args)

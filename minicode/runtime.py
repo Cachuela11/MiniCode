@@ -19,7 +19,7 @@ from .observability import (
 )
 from .policy import PolicyEngine
 from .prompts import SYSTEM_PROMPT_TEMPLATE, build_task_message
-from .skills import render_skill_prompt
+from .skills import render_skill_catalog_prompt
 from .task_mode import TaskModeRouter
 
 if TYPE_CHECKING:
@@ -86,7 +86,7 @@ def run_agent(agent: CodingAgent, task: str) -> AgentResult:
             "role": "system",
             "content": SYSTEM_PROMPT_TEMPLATE.format(
                 tool_descriptions=agent.tools.describe(),
-                skill_instructions=render_skill_prompt(skill_route),
+                skill_instructions=render_skill_catalog_prompt(agent.skill_catalog, skill_route),
                 context_layer_instructions=render_context_layer_prompt(),
             ),
         },

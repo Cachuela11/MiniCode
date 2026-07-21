@@ -31,6 +31,208 @@ from .subagents import (
 
 
 @dataclass(frozen=True)
+class ToolSpec:
+    name: str
+    description: str
+    schema: str
+    category: str
+    risk: str = "low"
+    common: bool = False
+
+    def render(self) -> str:
+        return f"- {self.name}: {self.description} Args: {self.schema}"
+
+
+class ToolCatalog:
+    def __init__(self, specs: dict[str, ToolSpec]):
+        self.specs = dict(specs)
+
+    def names(self) -> list[str]:
+        return sorted(self.specs)
+
+    def common_names(self) -> list[str]:
+        return sorted(name for name, spec in self.specs.items() if spec.common)
+
+    def describe(self, names: list[str] | None = None) -> str:
+        selected = self.common_names() if names is None else sorted({name for name in names if name in self.specs})
+        return "\n".join(self.specs[name].render() for name in selected)
+
+    def search(self, query: str, limit: int) -> list[ToolSpec]:
+        text = _normalize_search_text(query)
+        scored: list[tuple[int, str, ToolSpec]] = []
+        for name, spec in self.specs.items():
+            haystack = _normalize_search_text(" ".join([spec.name, spec.description, spec.schema, spec.category]))
+            score = 0
+            for token in text.split():
+                if token in spec.name:
+                    score += 5
+                elif token in spec.category:
+                    score += 3
+                elif token in haystack:
+                    score += 1
+            if score:
+                scored.append((score, name, spec))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [item[2] for item in scored[:limit]]
+
+
+def build_tool_catalog() -> ToolCatalog:
+    specs = {
+        "search_tools": ToolSpec(
+            "search_tools",
+            "Find available extended tools and return their schemas.",
+            '{"query": "capability needed", "limit": 5}',
+            "tool_discovery",
+            common=True,
+        ),
+        "run_shell": ToolSpec(
+            "run_shell",
+            "Run a shell command in Docker /workspace when structured tools are insufficient.",
+            '{"command": "shell command to run in /workspace"}',
+            "execution",
+            risk="high",
+            common=True,
+        ),
+        "list_files": ToolSpec(
+            "list_files",
+            "List files under a workspace path.",
+            '{"path": ".", "max_depth": 2, "limit": 200}',
+            "file_read",
+            common=True,
+        ),
+        "read_file": ToolSpec(
+            "read_file",
+            "Read a file range from the workspace.",
+            '{"path": "relative/path", "start_line": 1, "limit": 200}',
+            "file_read",
+            risk="medium",
+            common=True,
+        ),
+        "edit_file": ToolSpec(
+            "edit_file",
+            "Replace exact text in a file; safer than rewriting whole files.",
+            '{"path": "relative/path", "old_text": "exact text", "new_text": "replacement", "replace_all": false}',
+            "file_edit",
+            risk="high",
+            common=True,
+        ),
+        "write_file": ToolSpec(
+            "write_file",
+            "Create or overwrite a file in the workspace.",
+            '{"path": "relative/path", "content": "new file content", "overwrite": false}',
+            "file_write",
+            risk="high",
+            common=True,
+        ),
+        "run_tests": ToolSpec(
+            "run_tests",
+            "Run a test command in Docker /workspace.",
+            '{"command": "test command, default: python -m pytest"}',
+            "test",
+            risk="medium",
+            common=True,
+        ),
+        "glob_files": ToolSpec(
+            "glob_files",
+            "Find files by glob pattern.",
+            '{"pattern": "**/*.py", "path": ".", "limit": 100}',
+            "file_read",
+        ),
+        "grep_files": ToolSpec(
+            "grep_files",
+            "Search workspace files by text or regex.",
+            '{"pattern": "text or regex", "path": ".", "limit": 100, "case_sensitive": false}',
+            "file_read",
+        ),
+        "todo_write": ToolSpec(
+            "todo_write",
+            "Maintain the current task plan with explicit statuses.",
+            '{"todos": [{"id": "short_id", "content": "task", "status": "pending|in_progress|completed"}]}',
+            "planning",
+            common=True,
+        ),
+        "web_fetch": ToolSpec(
+            "web_fetch",
+            "Fetch an http/https webpage as an observation.",
+            '{"url": "https://example.com/docs", "max_chars": 6000}',
+            "network",
+            risk="medium",
+        ),
+        "inspect_diagnostics": ToolSpec(
+            "inspect_diagnostics",
+            "Inspect Python syntax diagnostics for files under a path.",
+            '{"path": ".", "limit": 100}',
+            "diagnostics",
+            risk="medium",
+        ),
+        "read_context_artifact": ToolSpec(
+            "read_context_artifact",
+            "Read an externalized context artifact by id.",
+            '{"artifact_id": "obs-0001", "start_line": 1, "limit": 200}',
+            "context_read",
+        ),
+        "search_skills": ToolSpec(
+            "search_skills",
+            "Search reusable high-level skills.",
+            '{"query": "what you need help with", "limit": 5}',
+            "skill",
+            common=True,
+        ),
+        "load_skill": ToolSpec(
+            "load_skill",
+            "Load a full skill workflow and its recommended tool schemas.",
+            '{"name": "skill_name", "max_chars": 4000}',
+            "skill",
+            common=True,
+        ),
+        "search_memory": ToolSpec(
+            "search_memory",
+            "Search project, procedural, experience, and session memories.",
+            '{"query": "project fact, past lesson, or session detail", "limit": 5}',
+            "memory",
+        ),
+        "load_memory": ToolSpec(
+            "load_memory",
+            "Load a full memory by id.",
+            '{"memory_id": "memory-id", "max_chars": 4000}',
+            "memory",
+        ),
+        "plan_subagents": ToolSpec(
+            "plan_subagents",
+            f"Plan up to {MAX_STAGE_NODES} read-only subagent tasks.",
+            '{"goal": "main goal", "tasks": [{"name": "short_name", "task": "bounded investigation", "context": "why this subtask matters", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}], "max_parallel": 2}',
+            "subagent",
+        ),
+        "run_subagents": ToolSpec(
+            "run_subagents",
+            f"Run up to {MAX_STAGE_NODES} read-only subagents.",
+            '{"tasks": [{"name": "short_name", "task": "bounded investigation", "context": "approved planning context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}]}',
+            "subagent",
+        ),
+        "plan_subagent_workflow": ToolSpec(
+            "plan_subagent_workflow",
+            f"Plan up to {MAX_WORKFLOW_STAGES} serial stages with up to {MAX_STAGE_NODES} nodes per stage and bounded edges.",
+            '{"goal": "main goal", "stages": [{"name": "stage_name", "nodes": [{"name": "node_a", "task": "bounded investigation", "context": "stage-local context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}], "entry_nodes": ["node_a"], "edges": [{"from": "node_a", "to": "node_b", "condition": "on_success", "max_traversals": 1}], "max_iterations": 4}], "max_parallel_per_stage": 2}',
+            "subagent_workflow",
+        ),
+        "run_subagent_workflow": ToolSpec(
+            "run_subagent_workflow",
+            f"Run approved stage workflow; edges max {MAX_STAGE_EDGES}, max_iterations {MAX_STAGE_WORKFLOW_ITERATIONS}, edge max_traversals {MAX_EDGE_TRAVERSALS}.",
+            '{"stages": [{"name": "stage_name", "nodes": [{"name": "node_a", "task": "bounded investigation", "context": "approved context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}]}], "max_parallel_per_stage": 2}',
+            "subagent_workflow",
+        ),
+        "finish": ToolSpec(
+            "finish",
+            "End the agent loop and answer the user.",
+            '{"answer": "concise final answer for the user"}',
+            "control",
+            common=True,
+        ),
+    }
+    return ToolCatalog(specs)
+
+
+@dataclass(frozen=True)
 class ToolResult:
     ok: bool
     output: str
@@ -70,8 +272,10 @@ class ToolRegistry:
         self.model = model
         self.skill_recall_k = max(0, skill_recall_k)
         self.todos: list[dict[str, str]] = []
+        self.tool_catalog = build_tool_catalog()
         self.security = ToolSecurityReviewer(self.workspace)
         self._tools: dict[str, ToolHandler] = {
+            "search_tools": self._search_tools,
             "run_shell": self._run_shell,
             "list_files": self._list_files,
             "read_file": self._read_file,
@@ -106,32 +310,8 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return sorted(self._tools)
 
-    def describe(self) -> str:
-        return "\n".join(
-            [
-                '- run_shell: {"command": "shell command to run in /workspace"}',
-                '- list_files: {"path": ".", "max_depth": 2, "limit": 200}',
-                '- read_file: {"path": "relative/path", "start_line": 1, "limit": 200}',
-                '- edit_file: {"path": "relative/path", "old_text": "exact text", "new_text": "replacement", "replace_all": false}',
-                '- write_file: {"path": "relative/path", "content": "new file content", "overwrite": false}',
-                '- run_tests: {"command": "test command, default: python -m pytest"}',
-                '- glob_files: {"pattern": "**/*.py", "path": ".", "limit": 100}',
-                '- grep_files: {"pattern": "text or regex", "path": ".", "limit": 100, "case_sensitive": false}',
-                '- todo_write: {"todos": [{"id": "short_id", "content": "task", "status": "pending|in_progress|completed"}]}',
-                '- web_fetch: {"url": "https://example.com/docs", "max_chars": 6000}',
-                '- inspect_diagnostics: {"path": ".", "limit": 100}',
-                '- read_context_artifact: {"artifact_id": "obs-0001", "start_line": 1, "limit": 200}',
-                '- search_skills: {"query": "what you need help with", "limit": 5}',
-                '- load_skill: {"name": "skill_name", "max_chars": 4000}',
-                '- search_memory: {"query": "project fact, past lesson, or session detail", "limit": 5}',
-                '- load_memory: {"memory_id": "memory-id", "max_chars": 4000}',
-                f'- plan_subagents: max {MAX_STAGE_NODES} tasks, {{"goal": "main goal", "tasks": [{{"name": "short_name", "task": "bounded investigation", "context": "why this subtask matters", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}}], "max_parallel": 2}}',
-                f'- run_subagents: max {MAX_STAGE_NODES} tasks, {{"tasks": [{{"name": "short_name", "task": "bounded investigation", "context": "approved planning context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}}]}}',
-                f'- plan_subagent_workflow: max {MAX_WORKFLOW_STAGES} serial stages, max {MAX_STAGE_NODES} nodes per stage, optional bounded stage edges, {{"goal": "main goal", "stages": [{{"name": "stage_name", "nodes": [{{"name": "node_a", "task": "bounded investigation", "context": "stage-local context", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}}, {{"name": "node_b", "task": "bounded follow-up", "context": "uses stage-local handoff", "allowed_tools": ["list_files","read_file","grep_files"], "path_scope": ["relative/path"], "max_steps": 4}}], "entry_nodes": ["node_a"], "edges": [{{"from": "node_a", "to": "node_b", "condition": "on_success", "max_traversals": 1}}], "max_iterations": 4}}], "max_parallel_per_stage": 2}}',
-                f'- run_subagent_workflow: max {MAX_WORKFLOW_STAGES} serial stages, max {MAX_STAGE_NODES} nodes per stage, stage edges max {MAX_STAGE_EDGES}, max_iterations {MAX_STAGE_WORKFLOW_ITERATIONS}, edge max_traversals {MAX_EDGE_TRAVERSALS}',
-                '- finish: {"answer": "concise final answer for the user"} inside args, e.g. {"action":"finish","args":{"answer":"..."}}',
-            ]
-        )
+    def describe(self, tool_names: list[str] | None = None) -> str:
+        return self.tool_catalog.describe(tool_names)
 
     def execute(self, name: str, args: dict[str, Any]) -> ToolResult:
         handler = self._tools.get(name)
@@ -170,6 +350,33 @@ class ToolRegistry:
                 dangerous_command=result.dangerous_command or review.dangerous,
             )
         return result
+
+    def _search_tools(self, args: dict[str, Any]) -> ToolResult:
+        query = str(args.get("query", "")).strip()
+        limit = _as_int(args.get("limit", 5), default=5, minimum=1, maximum=20)
+        if not query:
+            message = "ERROR: search_tools requires args.query."
+            return ToolResult(False, message, stderr=message, exit_code=2, invalid_command=True)
+        matches = self.tool_catalog.search(query, limit=limit)
+        if not matches:
+            output = "No matching tools found. Use the common tools already listed in the system prompt."
+            return ToolResult(True, output, stdout=output, exit_code=0)
+        payload = {
+            "query": query,
+            "matches": [
+                {
+                    "name": spec.name,
+                    "description": spec.description,
+                    "schema": spec.schema,
+                    "category": spec.category,
+                    "risk": spec.risk,
+                }
+                for spec in matches
+            ],
+            "instruction": "You may call any returned tool by name with args matching its schema.",
+        }
+        output = json.dumps(payload, indent=2, ensure_ascii=False)
+        return ToolResult(True, output, stdout=output, exit_code=0)
 
     def _run_shell(self, args: dict[str, Any]) -> ToolResult:
         command = str(args.get("command", "")).strip()
@@ -491,6 +698,9 @@ class ToolRegistry:
                 f"Source: {skill.source_path}",
                 f"Truncated: {str(truncated).lower()}",
                 "",
+                "Recommended tool schemas:",
+                self.tool_catalog.describe(skill.tools) or "No recommended tool schemas found.",
+                "",
                 body,
             ]
         )
@@ -735,6 +945,10 @@ def _compact_preview(value: str, limit: int = 300) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 3] + "..."
+
+
+def _normalize_search_text(value: str) -> str:
+    return " ".join(str(value or "").replace("_", " ").replace("-", " ").lower().split())
 
 
 def _workflow_stage_to_dict(stage) -> dict[str, Any]:

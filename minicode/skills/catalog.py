@@ -19,7 +19,7 @@ class SkillCatalog:
         return cls([])
 
     def all(self) -> list[Skill]:
-        return list(self._skills.values())
+        return [self._skills[name] for name in sorted(self._skills)]
 
     def get(self, name: str) -> Skill | None:
         return self._skills.get(name)

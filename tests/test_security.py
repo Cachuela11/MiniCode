@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from minicode.permissions import CommandPolicy, Decision
 from minicode.security import ToolSecurityReviewer
+from minicode.skills import Skill, SkillCatalog
 from minicode.tools import ToolRegistry
 
 
@@ -167,6 +168,38 @@ class ToolRegistrySecurityTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.exit_code, 1)
         self.assertIn("bad.py", result.output)
+
+    def test_search_tools_returns_matching_schema(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            registry = ToolRegistry(workspace=workspace, sandbox=FakeSandbox(workspace))
+
+            result = registry.execute("search_tools", {"query": "find files by pattern", "limit": 3})
+
+        self.assertTrue(result.ok)
+        self.assertIn("glob_files", result.output)
+        self.assertIn("schema", result.output)
+
+    def test_load_skill_returns_recommended_tool_schemas(self):
+        skill = Skill(
+            name="demo_skill",
+            description="Demo skill.",
+            tools=["grep_files"],
+            body="Use grep_files to inspect references.",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            registry = ToolRegistry(
+                workspace=workspace,
+                sandbox=FakeSandbox(workspace),
+                skill_catalog=SkillCatalog([skill]),
+            )
+
+            result = registry.execute("load_skill", {"name": "demo_skill"})
+
+        self.assertTrue(result.ok)
+        self.assertIn("Recommended tool schemas", result.output)
+        self.assertIn("grep_files", result.output)
 
 
 if __name__ == "__main__":
