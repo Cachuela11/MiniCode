@@ -992,6 +992,34 @@ flowchart TD
 
 当前 tools 分为 common tools 和 extended tools：common tool schema 常驻 system prompt；extended tool 仍然注册可执行，但默认靠 `search_tools` 返回 schema 后再调用。
 
+常驻上下文中的 common tools：
+
+- `search_tools`：按需求搜索非常用 tool schema。
+- `run_shell`：在 Docker `/workspace` 中执行 shell 命令。
+- `list_files`：列出 workspace 文件。
+- `read_file`：读取文件片段。
+- `edit_file`：对文件做精确文本替换。
+- `write_file`：创建或覆盖文件。
+- `run_tests`：在 Docker `/workspace` 中运行测试命令。
+- `todo_write`：维护当前任务计划。
+- `search_skills`：搜索可复用 skill。
+- `load_skill`：加载完整 skill workflow 和推荐 tool schemas。
+- `finish`：结束 agent loop 并回答用户。
+
+`search_tools` 可发现的 extended tools：
+
+- `glob_files`：按 glob 模式查找文件。
+- `grep_files`：搜索 workspace 文件内容。
+- `web_fetch`：抓取网页内容。
+- `inspect_diagnostics`：检查 Python 语法诊断。
+- `read_context_artifact`：读取被外置化的大型 observation。
+- `search_memory`：搜索 session/project/procedural/experience memory。
+- `load_memory`：加载完整 memory。
+- `plan_subagents`：规划并校验一组只读子 Agent 任务。
+- `run_subagents`：运行并行只读子 Agent。
+- `plan_subagent_workflow`：规划 stage workflow。
+- `run_subagent_workflow`：执行已规划的 stage workflow。
+
 - `search_tools`
   - 参数：`query`、`limit`
   - 作用：搜索扩展 tool，并返回匹配 tool 的名称、说明、参数 schema、类别和风险等级。
