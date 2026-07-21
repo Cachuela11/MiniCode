@@ -618,12 +618,13 @@ flowchart TD
     C --> D[Stage 1: metadata recall topK<br/>triggers +5<br/>intents +3<br/>tags +2<br/>name +1<br/>description +1]
     D --> E[Stage 2: DeepSeek rerank topN]
     E --> F[Inject skill catalog summaries<br/>mark selected_hint only]
-    F --> G{Model needs full workflow?}
+    F --> K[Start agent loop]
+    K --> G{Model needs full workflow?}
     G -->|yes| H[load_skill<br/>full skill + recommended tool schemas]
     G -->|no skill match| I[Use common tools<br/>or search_tools]
     E --> J[Record skill_route in run log]
-    H --> K[Start agent loop]
-    I --> K
+    H --> L[Continue with tool workflow]
+    I --> L
 ```
 
 当前 skill 检索是“底层统一，入口分开”：
@@ -704,8 +705,12 @@ flowchart TD
     E --> G[Selected skills]
     F --> G
     G --> H{Entry}
-    H -->|automatic route| I[render_skill_prompt<br/>inject into current turn]
-    H -->|search_skills tool| J[return observation<br/>write retrieval_trace]
+    H -->|automatic route| I[route hint + selected_hint<br/>no full skill body]
+    H -->|search_skills tool| J[return candidates observation<br/>write retrieval_trace]
+    I --> K{Need full workflow?}
+    J --> K
+    K -->|yes| L[load_skill]
+    L --> M[full workflow + recommended tool schemas]
 ```
 
 入口说明：
@@ -713,6 +718,29 @@ flowchart TD
 - 自动 route：发生在单任务运行开始前，或 `--chat` 每个用户 turn 开始前。它不暴露给模型，属于系统主动为当前任务挑选少量 skill。
 - `search_skills` tool：发生在 agent loop 内。模型默认知道该 common tool，因此可以主动搜索 skill；搜索结果仍然来自同一个 `SkillToolRetriever`。
 - `load_skill` tool：不参与检索排序，只负责按名称读取某个 skill 的正文，并把完整 workflow 和 recommended tool schemas 作为 observation 加入后续上下文。
+
+Tool 检索与加载流程：
+
+```mermaid
+flowchart TD
+    A[Agent loop] --> B[Common tool schemas already visible]
+    B --> C{Need an extended tool?}
+    C -->|no| D[Call common tool directly]
+    C -->|yes| E[search_tools query]
+    E --> F[ToolCatalog local search<br/>name + category + description + schema]
+    F --> G[Return matching tool schemas]
+    G --> H[Model calls selected tool]
+    I[load_skill] --> J[Full skill workflow]
+    I --> K[Recommended tool schemas from skill.tools]
+    J --> H
+    K --> H
+```
+
+- `ToolCatalog` 统一保存所有 tool 的 `name`、`description`、`schema`、`category` 和 `risk`。
+- `ToolRegistry.describe()` 默认只渲染 common tools，降低常驻 prompt 体积。
+- `search_tools` 是 tool discovery 入口，只返回 schema，不执行目标 tool。
+- 具体 tool 即使不在 common list 中，也仍然注册在 `ToolRegistry`，执行前继续走 `ToolSecurityReviewer`。
+- `load_skill` 会把 skill 推荐 tool schema 一起返回，因此 Skill 工作流和 Tool 懒加载不冲突。
 
 Memory 检索召回与精排流程：
 
